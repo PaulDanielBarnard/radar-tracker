@@ -26,7 +26,7 @@ def main():
         raise SystemExit(f"No trained model at {CHECKPOINT}. Run `python train_neural.py` first.")
 
     model = GRUTracker()
-    model.load_state_dict(torch.load(CHECKPOINT, map_location="cpu"))
+    model.load_state_dict(torch.load(CHECKPOINT, map_location="cpu", weights_only=True))
     model.eval()
 
     lbl = ["raw radar"] + [f"KF q = {q:g}" for q in Q_VAL] + ["GRU"]

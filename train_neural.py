@@ -103,7 +103,7 @@ def main():
         print(f"epoch {epoch:3d}  train RMSE {train_loss ** 0.5 * OUT_SCALE:7.1f} m"
               f"    val RMSE {val_loss ** 0.5 * OUT_SCALE:7.1f} m{marker}")
 
-    model.load_state_dict(torch.load(CHECKPOINT))   # reload the best epoch
+    model.load_state_dict(torch.load(CHECKPOINT, weights_only=True))   # reload the best epoch
     report_by_scenario(model, val_sets)
 
 
