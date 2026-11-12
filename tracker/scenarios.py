@@ -13,4 +13,4 @@ SCENARIOS = {
     "missed_30": ("random", replace(BASE_RADAR,p_detect=0.7))
 }
 
-Q_VAL = [0.1, 1.0, 10.0, 10.0]
+Q_VAL = [0.1, 1.0, 10.0, 100.0]
