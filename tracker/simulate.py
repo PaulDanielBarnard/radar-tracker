@@ -95,3 +95,14 @@ def simulate_batch(n_tracks: int, mode: str, radar: RadarConfig, target: TargetC
                    seed: int = 0) -> list:
     rng = np.random.default_rng(seed)
     return [simulate_track(rng, mode, radar, target) for _ in range(n_tracks)]
+
+
+def forward_fill(track: Track) -> np.ndarray:
+    """Latest radar plot at every scan. Missed scans reuse the last real plot."""
+    last = track.meas_xy[0].copy()  # scan 0 is always detected
+    filled = np.zeros((len(track.detected), 2))
+    for k in range(len(track.detected)):
+        if track.detected[k]:
+            last = track.meas_xy[k]
+        filled[k] = last
+    return filled

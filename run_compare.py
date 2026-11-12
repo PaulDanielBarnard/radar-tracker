@@ -4,10 +4,9 @@ import argparse
 import numpy as np
 import torch
 
-from run_baseline import evaluate,raw_measurement_error
 from tracker.dataset import tracks_to_tensors
 from tracker.kalman import ConstantVelocityKF
-from tracker.metrics import rmse_over_tracks
+from tracker.metrics import evaluate, raw_measurement_error, rmse_over_tracks
 from tracker.neural import GRUTracker
 from tracker.scenarios import Q_VAL, SCENARIOS, TARGET
 from tracker.simulate import simulate_batch
