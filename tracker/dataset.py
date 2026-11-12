@@ -20,6 +20,19 @@ def track_to_arr(track, hybrid=False):
         ], axis = 1)    # shape (T, 5)
     return feat,filled,track.truth[:, :2]
 
+TYPICAL_RANGE = 35_000.0   # metres: a typical target distance, used to size bearing noise
+
+
+def noise_scale(track):
+    """Expected raw radar error of this track, in OUT_SCALE units."""
+    r = track.radar
+    return float(np.hypot(r.sigma_r, TYPICAL_RANGE * r.sigma_theta)) / OUT_SCALE
+
+
+def noise_scales(tracks):
+    return torch.tensor([noise_scale(t) for t in tracks], dtype=torch.float32)
+
+
 def tracks_to_tensors(tracks, hybrid=False):
     feats, bases, truths = zip(*(track_to_arr(t, hybrid) for t in tracks))
     to_t = lambda a: torch.tensor( np.stack(a), dtype = torch.float32)

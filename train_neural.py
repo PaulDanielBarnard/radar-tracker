@@ -5,7 +5,7 @@ import torch
 from torch import nn
 from torch.utils.data import DataLoader,TensorDataset
 
-from tracker.dataset import OUT_SCALE, tracks_to_tensors
+from tracker.dataset import OUT_SCALE, noise_scales, tracks_to_tensors
 from tracker.metrics import BURN_IN
 from tracker.neural import GRUTracker, load_model, save_model
 from tracker.paths import OUT_DIR, checkpoint
@@ -17,23 +17,31 @@ def make_data(n_per_scenario: int, seed: int):
     sets = {}
     for i, (name, (mode, radar)) in enumerate(SCENARIOS.items()):
         tracks = simulate_batch(n_per_scenario, mode, radar, TARGET, seed = seed + i)
-        sets[name] = tracks_to_tensors(tracks)
+        sets[name] = (*tracks_to_tensors(tracks), noise_scales(tracks))
     return sets
 
 
 def pool(sets):
-    """Stack every scenario's (feats, base, truth) into one training set."""
+    """Stack every scenario's (feats, base, truth, scale) into one training set."""
     return tuple(torch.cat(parts) for parts in zip(*sets.values()))
 
 
-def loss_fn(pred, truth):
-    """Mean squared pos error, in units of OUT_SCALE (So numbers stay near 0-1)"""
-    return (((pred - truth) / OUT_SCALE) ** 2).sum(dim = 2).mean()
+def loss_fn(pred, truth, scale = None):
+    """Mean squared position error, in units of OUT_SCALE (So numbers stay near 0-1).
+
+    With `scale` (each track's expected radar noise) the error is measured relative to how
+    noisy that track's radar is, so easy scenarios count as much as hard ones."""
+    sq_dist = (((pred - truth) / OUT_SCALE) ** 2).sum(dim = 2)   # squared distance error per scan
+    per_track = sq_dist.mean(dim = 1)
+    if scale is not None:
+        per_track = per_track / scale ** 2
+    return per_track.mean()
 
 
-def settled_loss(pred, truth):
+def settled_loss(pred, truth, scale = None):
     """Same as loss_fn but skips the first BURN_IN scans, matching rmse_over_tracks."""
-    return loss_fn(pred[:, BURN_IN:], truth[:, BURN_IN:])
+    return loss_fn(pred[:, BURN_IN:], truth[:, BURN_IN:], scale)
+
 
 def rmse_m(pred, truth):
     """Burn-in-adjusted RMSE in metres."""
@@ -45,7 +53,7 @@ def report_by_scenario(model, val_sets):
     model.eval()
     print(f"\n{'scenario':<12}{'raw radar':>11}{'GRU':>10}")
     with torch.no_grad():
-        for name, (feats, base, truth) in val_sets.items():
+        for name, (feats, base, truth, _) in val_sets.items():
             print(f"{name:<12}{rmse_m(base, truth):>11.1f}{rmse_m(model(feats, base), truth):>10.1f}")
 
 
@@ -68,7 +76,7 @@ def main():
     # (The Baseline's test seed is 42, so none of these overlap with it)
     train = pool(make_data(args.n, seed = 1000))
     val_sets = make_data(args.n // 4, seed = 2000)
-    val_feats, val_base, val_truth = pool(val_sets)
+    val_feats, val_base, val_truth, val_scale = pool(val_sets)
     loader = DataLoader(TensorDataset(*train), batch_size = args.batch, shuffle = True)
 
     raw_rmse = settled_loss(val_base, val_truth).sqrt().item() * OUT_SCALE
@@ -82,10 +90,10 @@ def main():
         model.train()
         total = 0.0
 
-        for feats, base, truth in loader:
+        for feats, base, truth, scale in loader:
 
             opt.zero_grad() # 1. Clear old gradients
-            loss = loss_fn(model(feats, base), truth) # 2. Forward pass + loss
+            loss = loss_fn(model(feats, base), truth, scale) # 2. Forward pass + loss
             loss.backward() # 3. Compute Gradients
             nn.utils.clip_grad_norm_(model.parameters(), 1.0)   # 4. Stop Huge Steps
             opt.step() # 5. Update Weights
@@ -96,7 +104,9 @@ def main():
 
         model.eval()
         with torch.no_grad():
-            val_loss = settled_loss(model(val_feats, val_base), val_truth).item()
+            val_pred = model(val_feats, val_base)
+            val_loss = settled_loss(val_pred, val_truth, val_scale).item()   # picks the best epoch
+            val_rmse = rmse_m(val_pred, val_truth)                           # metres, for humans
 
         marker = ""
         if val_loss < best:
@@ -104,8 +114,8 @@ def main():
             save_model(model, ckpt)
             marker = " <- saved"
 
-        print(f"epoch {epoch:3d}  train RMSE {train_loss ** 0.5 * OUT_SCALE:7.1f} m"
-              f"    val RMSE {val_loss ** 0.5 * OUT_SCALE:7.1f} m{marker}")
+        print(f"epoch {epoch:3d}  train loss {train_loss:6.3f}   val loss {val_loss:6.3f}"
+              f"   val RMSE {val_rmse:7.1f} m{marker}")
 
     model = load_model(ckpt)   # reload the best epoch
     report_by_scenario(model, val_sets)
