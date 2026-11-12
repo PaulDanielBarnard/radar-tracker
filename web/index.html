@@ -130,6 +130,12 @@
       <input id="scrub" type="range" min="0" max="119" value="0" aria-label="Scan number">
       <span id="scanlabel" class="sub" style="margin:0;min-width:7ch"></span>
       <button id="next" type="button">New track</button>
+      <label class="sub" style="margin:0">Speed
+        <select id="speed" aria-label="Playback speed">
+          <option value="0.5">0.5×</option><option value="1" selected>1×</option>
+          <option value="2">2×</option><option value="4">4×</option>
+        </select>
+      </label>
     </div>
 
     <div class="cards" id="cards"></div>
@@ -155,11 +161,11 @@
   const css = (name) => getComputedStyle(document.documentElement).getPropertyValue(name).trim();
   const reduceMotion = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
   const SCANS_PER_SEC = 6;       // close-up replay speed
-  const PPI_SCANS_PER_SEC = 3;   // radar view: the sweep makes this many turns per second
+  const PPI_SCANS_PER_SEC = 1;   // radar view: the sweep makes this many turns per second (at 1x)
   const BAR_CAP = 700;
   const NICE = { straight: "Straight", turning: "Turning", maneuvers: "Maneuvers", noisy: "Noisy radar", missed_30: "30% missed scans" };
 
-  const state = { scn: 0, trk: 0, q: D.qs[1], t: 0, playing: !reduceMotion, view: "ppi", zoom: false,
+  const state = { scn: 0, trk: 0, q: D.qs[1], t: 0, playing: !reduceMotion, view: "ppi", zoom: false, speed: 1,
                   show: { truth: true, plots: true, kf: true, gru: true } };
   let prepared = null, view = null, last = 0;
 
@@ -479,7 +485,7 @@
     const dt = Math.min((now - last) / 1000, 0.1); last = now;
     if (state.playing) {
       const ppi = state.view === "ppi", end = ppi ? prepared.T : prepared.T - 1;
-      state.t += dt * (ppi ? PPI_SCANS_PER_SEC : SCANS_PER_SEC);
+      state.t += dt * (ppi ? PPI_SCANS_PER_SEC : SCANS_PER_SEC) * state.speed;
       if (state.t >= end) { state.t = ppi ? end - 1e-6 : end; state.playing = false; $("play").textContent = "Replay"; }
       draw();
     }
@@ -503,6 +509,7 @@
       : "Top-down view zoomed to the track, so the noise is easy to see.";
     draw();
   }
+  $("speed").addEventListener("change", (e) => { state.speed = +e.target.value; });
   $("v-ppi").addEventListener("click", () => setView("ppi"));
   $("v-close").addEventListener("click", () => setView("close"));
   $("zoom").addEventListener("click", () => {
