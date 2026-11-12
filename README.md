@@ -9,7 +9,7 @@ Runs entirely on a laptop with simulated data. No downloads, no hardware.
 - [x] Step 1: simulator + Kalman baseline + tests
 - [x] Step 2: neural tracker (GRU/LSTM in PyTorch) trained on simulated tracks
 - [x] Step 3: comparison by scenario (`run_compare.py`); failure analysis still to write up
-- [x] Step 4: browser demo replaying Kalman vs GRU on noisy tracks (`web/`)
+- [x] Step 4: browser demo with a traditional radar (PPI) view replaying Kalman vs GRU on noisy tracks (`web/`)
 
 ## Setup (VS Code)
 
