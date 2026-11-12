@@ -2,12 +2,34 @@
 import numpy as np
 import torch
 
+from .kalman import ConstantVelocityKF
 from .simulate import forward_fill
 
 POS_SCALE = 50_000.0   # metres: puts positions roughly in [-1, 1]
 VEL_SCALE = 300.0      # metres per scan: typical movement between scans
 N_FEATURES = 11         # columns per scan fed to the network
 OUT_SCALE = 1000.0     # metres: the network's output unit (1.0 = 1 km correction)
+
+HYBRID_QS = (0.1, 100.0)    # Kalman settings whose output is fed to the network
+HYBRID_BASE_Q = 100.0       # the filter whose position the network corrects
+N_KF_FEATURES = 4 * len(HYBRID_QS)
+
+
+def n_features(hybrid: bool) -> int:
+    return N_FEATURES + (N_KF_FEATURES if hybrid else 0)
+
+
+def kalman_features(track, filled):
+    """Run Kalman filters on the track. Returns (extra feature columns, base position)."""
+    cols, base = [], None
+    for q in HYBRID_QS:
+        est = ConstantVelocityKF(q=q).run(track)                 # (T, 4): x, y, vx, vy
+        cols.append((est[:, :2] - filled) / OUT_SCALE)           # 2: filter vs latest plot
+        cols.append(est[:, 2:4] / VEL_SCALE)                     # 2: filter's velocity estimate
+        if q == HYBRID_BASE_Q:
+            base = est[:, :2]
+    return np.concatenate(cols, axis=1), base
+
 
 def track_to_arr(track, hybrid=False):
     filled = forward_fill(track)
@@ -34,7 +56,11 @@ def track_to_arr(track, hybrid=False):
         np.cos(bearing)[:, None],                # 1
         noise,                                   # 2: radar noise levels (a Kalman filter is told these too)
     ], axis=1)                                   # shape (T, 11)
-    return feat, filled, track.truth[:, :2]
+    base = filled                                # position the network will correct
+    if hybrid:                                   # start from a Kalman filter instead
+        extra, base = kalman_features(track, filled)
+        feat = np.concatenate([feat, extra], axis=1)
+    return feat, base, track.truth[:, :2]
 
 
 TYPICAL_RANGE = 35_000.0   # metres: a typical target distance, used to size bearing noise

@@ -1,7 +1,7 @@
 import numpy as np
 import torch
 
-from tracker.dataset import N_FEATURES, tracks_to_tensors
+from tracker.dataset import N_FEATURES, n_features, tracks_to_tensors
 from tracker.neural import GRUTracker, load_model, save_model
 from tracker.simulate import RadarConfig,TargetConfig,simulate_batch
 
@@ -34,3 +34,14 @@ def test_saved_model_reloads_with_identical_outputs(tmp_path):
     reloaded = load_model(tmp_path / "m.pt")
     assert reloaded.config == model.config
     assert torch.allclose(model(feats, base), reloaded(feats, base))
+
+
+def test_hybrid_features_start_from_the_kalman_estimate():
+    tracks = simulate_batch(2, "random", RadarConfig(p_detect=0.7), TargetConfig(), seed=0)
+    feats, base, truth = tracks_to_tensors(tracks, hybrid=True)
+    assert feats.shape == (2, 120, n_features(True))
+    assert not torch.isnan(feats).any()
+    _, plain_base, _ = tracks_to_tensors(tracks)
+    assert not torch.allclose(base, plain_base)          # base is the Kalman position
+    model = GRUTracker(n_feat=n_features(True), hybrid=True)
+    assert torch.allclose(model(feats, base), base)       # zero head -> exactly the Kalman estimate

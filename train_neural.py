@@ -6,30 +6,30 @@ import torch
 from torch import nn
 from torch.utils.data import DataLoader,TensorDataset
 
-from tracker.dataset import OUT_SCALE, noise_scales, tracks_to_tensors
+from tracker.dataset import OUT_SCALE, n_features, noise_scales, tracks_to_tensors
 from tracker.metrics import BURN_IN
 from tracker.neural import GRUTracker, load_model, save_model
 from tracker.paths import OUT_DIR, checkpoint
 from tracker.scenarios import SCENARIOS, TARGET, random_radar
 from tracker.simulate import simulate_batch, simulate_track
 
-def make_data(n_per_scenario: int, seed: int):
+def make_data(n_per_scenario: int, seed: int, hybrid: bool = False):
     """Simulate n tracks for every scenario. Returns {scenario name: tensors}."""
     sets = {}
     for i, (name, (mode, radar)) in enumerate(SCENARIOS.items()):
         tracks = simulate_batch(n_per_scenario, mode, radar, TARGET, seed = seed + i)
-        sets[name] = (*tracks_to_tensors(tracks), noise_scales(tracks))
+        sets[name] = (*tracks_to_tensors(tracks, hybrid), noise_scales(tracks))
     return sets
 
 
-def make_random_data(n_tracks: int, seed: int):
+def make_random_data(n_tracks: int, seed: int, hybrid: bool = False):
     """Tracks with a random motion type and a random radar each, instead of 5 fixed scenarios."""
     rng = np.random.default_rng(seed)
     tracks = []
     for _ in range(n_tracks):
         mode = ("straight", "turn", "random", "random")[rng.integers(4)]   # favour maneuvers
         tracks.append(simulate_track(rng, mode, random_radar(rng), TARGET))
-    return {"random": (*tracks_to_tensors(tracks), noise_scales(tracks))}
+    return {"random": (*tracks_to_tensors(tracks, hybrid), noise_scales(tracks))}
 
 
 def pool(sets):
@@ -62,7 +62,7 @@ def rmse_m(pred, truth):
 def report_by_scenario(model, val_sets):
     """Show where the model beats raw radar and where it does not."""
     model.eval()
-    print(f"\n{'scenario':<12}{'raw radar':>11}{'GRU':>10}")
+    print(f"\n{'scenario':<12}{'start':>11}{'GRU':>10}")
     with torch.no_grad():
         for name, (feats, base, truth, _) in val_sets.items():
             print(f"{name:<12}{rmse_m(base, truth):>11.1f}{rmse_m(model(feats, base), truth):>10.1f}")
@@ -77,6 +77,7 @@ def main():
     ap.add_argument("--lr", type = float, default = 1e-3)
     ap.add_argument("--hidden", type = int, default = 64, help = "GRU memory size")
     ap.add_argument("--layers", type = int, default = 1, help = "stacked GRU layers")
+    ap.add_argument("--hybrid", action = "store_true", help = "start from a Kalman filter and learn a correction")
     ap.add_argument("--randomize", action = "store_true", help = "train on random radar settings")
     ap.add_argument("--name", default = "gru_tracker", help = "checkpoint name in outputs/")
     args = ap.parse_args()
@@ -87,17 +88,18 @@ def main():
     # Train & Validation use different seeds -> different tracks
     # (The Baseline's test seed is 42, so none of these overlap with it)
     if args.randomize:   # same number of tracks as the fixed scenarios, but varied conditions
-        train = pool(make_random_data(args.n * len(SCENARIOS), seed = 1000))
+        train = pool(make_random_data(args.n * len(SCENARIOS), seed = 1000, hybrid = args.hybrid))
     else:
-        train = pool(make_data(args.n, seed = 1000))
-    val_sets = make_data(args.n // 4, seed = 2000)
+        train = pool(make_data(args.n, seed = 1000, hybrid = args.hybrid))
+    val_sets = make_data(args.n // 4, seed = 2000, hybrid = args.hybrid)
     val_feats, val_base, val_truth, val_scale = pool(val_sets)
     loader = DataLoader(TensorDataset(*train), batch_size = args.batch, shuffle = True)
 
     raw_rmse = settled_loss(val_base, val_truth).sqrt().item() * OUT_SCALE
-    print(f"Validation RMSE of Raw Radar (The Num to beat): {raw_rmse:.1f} m\n")
+    print(f"Validation RMSE of the starting point (raw plot, or Kalman with --hybrid): {raw_rmse:.1f} m\n")
 
-    model = GRUTracker(hidden = args.hidden, layers = args.layers)
+    model = GRUTracker(n_feat = n_features(args.hybrid), hidden = args.hidden,
+                       layers = args.layers, hybrid = args.hybrid)
     opt = torch.optim.Adam(model.parameters(), lr = args.lr)
     best = float("inf")
 
