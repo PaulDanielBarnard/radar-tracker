@@ -8,6 +8,8 @@ class GRUTracker(nn.Module):
         super().__init__()
         self.gru = nn.GRU(n_feat, hidden, batch_first = True)   #Memory
         self.head = nn.Linear(hidden, 2)    # Memory -> (dx, dy)
+        nn.init.zeros_(self.head.weight)    # start with zero correction,
+        nn.init.zeros_(self.head.bias)      # i.e. exactly the raw radar plot
 
     def forward(self, feats, base):
         """feats: (batch, T, 5), base: (batch, T, 2) in m -> (batch, T, 2) m"""
