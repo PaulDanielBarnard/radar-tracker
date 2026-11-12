@@ -28,7 +28,7 @@ def pool(sets):
 
 def loss_fn(pred, truth):
     """Mean squared pos error, in units of OUT_SCALE (So numbers stay near 0-1)"""
-    return (((pred - truth) / OUT_SCALE) ** 2).mean()
+    return (((pred - truth) / OUT_SCALE) ** 2).sum(dim = 2).mean()
 
 
 def settled_loss(pred, truth):
