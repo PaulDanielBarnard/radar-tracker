@@ -7,7 +7,7 @@ Runs entirely on a laptop with simulated data. No downloads, no hardware.
 ## Status
 
 - [x] Step 1: simulator + Kalman baseline + tests
-- [ ] Step 2: neural tracker (GRU/LSTM in PyTorch) trained on simulated tracks
+- [x] Step 2: neural tracker (GRU/LSTM in PyTorch) trained on simulated tracks
 - [ ] Step 3: comparison by scenario + failure analysis
 - [ ] Step 4: live browser demo with sliders (like the trajectory project)
 
@@ -24,13 +24,22 @@ Runs entirely on a laptop with simulated data. No downloads, no hardware.
 3. Select the interpreter: Ctrl+Shift+P > "Python: Select Interpreter" > `.venv`.
 4. Run the baseline: `python run_baseline.py` (or press F5, "Run Kalman baseline").
 5. Run the tests: `python -m pytest`
+6. Train the neural tracker: `python train_neural.py` (saves `outputs/gru_tracker.pt`,
+   which is not committed, so every fresh clone must train first).
+7. Compare everything: `python run_compare.py` (raw radar vs Kalman filters vs GRU).
 
 ## Layout
 
     tracker/simulate.py   target motion + noisy radar model (range, bearing, missed scans)
     tracker/kalman.py     constant-velocity Kalman filter
-    tracker/metrics.py    position error and RMSE
+    tracker/metrics.py    position error, RMSE and shared evaluation helpers
+    tracker/scenarios.py  the five test scenarios and Kalman q values
+    tracker/dataset.py    turns tracks into tensors for the network
+    tracker/neural.py     GRU tracker that learns a correction to the latest plot
+    tracker/paths.py      where outputs and the model checkpoint live
     run_baseline.py       scenarios x filter settings table + plots in outputs/
+    train_neural.py       trains the GRU, reports RMSE per scenario
+    run_compare.py        raw radar vs Kalman vs GRU table, best per scenario
     tests/                sanity tests
 
 ## What the baseline already shows
