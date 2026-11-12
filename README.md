@@ -8,8 +8,8 @@ Runs entirely on a laptop with simulated data. No downloads, no hardware.
 
 - [x] Step 1: simulator + Kalman baseline + tests
 - [x] Step 2: neural tracker (GRU/LSTM in PyTorch) trained on simulated tracks
-- [ ] Step 3: comparison by scenario + failure analysis
-- [ ] Step 4: live browser demo with sliders (like the trajectory project)
+- [x] Step 3: comparison by scenario (`run_compare.py`); failure analysis still to write up
+- [x] Step 4: browser demo replaying Kalman vs GRU on noisy tracks (`web/`)
 
 ## Setup (VS Code)
 
@@ -27,6 +27,8 @@ Runs entirely on a laptop with simulated data. No downloads, no hardware.
 6. Train the neural tracker: `python train_neural.py` (saves `outputs/gru_tracker.pt`,
    which is not committed, so every fresh clone must train first).
 7. Compare everything: `python run_compare.py` (raw radar vs Kalman filters vs GRU).
+8. Build the website data: `python export_demo.py`, then serve the folder and open it:
+   `python -m http.server 8000 -d web` and visit http://localhost:8000
 
 ## Layout
 
@@ -40,6 +42,8 @@ Runs entirely on a laptop with simulated data. No downloads, no hardware.
     run_baseline.py       scenarios x filter settings table + plots in outputs/
     train_neural.py       trains the GRU, reports RMSE per scenario
     run_compare.py        raw radar vs Kalman vs GRU table, best per scenario
+    export_demo.py        bakes example tracks + RMSE into web/data.js
+    web/                  static demo page (index.html + generated data.js)
     tests/                sanity tests
 
 ## What the baseline already shows
