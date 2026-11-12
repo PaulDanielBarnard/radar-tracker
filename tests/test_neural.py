@@ -14,9 +14,10 @@ def test_tensors_have_no_nans_even_with_missed_scans():
     assert not torch.isnan(base).any()
 
 
-def test_untrained_model_stays_near_the_raw_plot():
+def test_untrained_model_outputs_the_raw_plot():
+    torch.manual_seed(0)
     tracks = simulate_batch(3, "straight", RadarConfig(), TargetConfig(), seed=0)
     feats, base, _ = tracks_to_tensors(tracks)
     pred = GRUTracker()(feats, base)
     assert pred.shape == base.shape
-    assert (pred - base).abs().max() < 1000   # correction starts small (under 1 km)
+    assert torch.allclose(pred, base)   # zero-initialised head -> no correction yet
