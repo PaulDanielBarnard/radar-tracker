@@ -3,7 +3,9 @@ name: Deploy demo to GitHub Pages
 on:
   push:
     branches: [main]
-    paths: ["web/**"]
+    paths:
+      - ".github/workflows/pages.yml"
+      - "web/**"
   workflow_dispatch:          # lets you run it manually from the Actions tab
 
 permissions:
@@ -17,19 +19,6 @@ concurrency:
 
 jobs:
   deploy:
-    runs-on: ubuntu-latest
-    environment:
-      name: github-pages
-      url: ${{ steps.deployment.outputs.page_url }}
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/configure-pages@v5
-      - uses: actions/upload-pages-artifact@v3
-        with:
-          path: web
-      - id: deployment
-        uses: actions/deploy-pages@v4
-Commit it:
     runs-on: ubuntu-latest
     environment:
       name: github-pages
