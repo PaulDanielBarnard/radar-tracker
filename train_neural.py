@@ -1,6 +1,7 @@
 """Train GRU Tracker on Simulated Tracks."""
 import argparse
 
+import numpy as np
 import torch
 from torch import nn
 from torch.utils.data import DataLoader,TensorDataset
@@ -9,8 +10,8 @@ from tracker.dataset import OUT_SCALE, noise_scales, tracks_to_tensors
 from tracker.metrics import BURN_IN
 from tracker.neural import GRUTracker, load_model, save_model
 from tracker.paths import OUT_DIR, checkpoint
-from tracker.scenarios import SCENARIOS, TARGET
-from tracker.simulate import simulate_batch
+from tracker.scenarios import SCENARIOS, TARGET, random_radar
+from tracker.simulate import simulate_batch, simulate_track
 
 def make_data(n_per_scenario: int, seed: int):
     """Simulate n tracks for every scenario. Returns {scenario name: tensors}."""
@@ -19,6 +20,16 @@ def make_data(n_per_scenario: int, seed: int):
         tracks = simulate_batch(n_per_scenario, mode, radar, TARGET, seed = seed + i)
         sets[name] = (*tracks_to_tensors(tracks), noise_scales(tracks))
     return sets
+
+
+def make_random_data(n_tracks: int, seed: int):
+    """Tracks with a random motion type and a random radar each, instead of 5 fixed scenarios."""
+    rng = np.random.default_rng(seed)
+    tracks = []
+    for _ in range(n_tracks):
+        mode = ("straight", "turn", "random", "random")[rng.integers(4)]   # favour maneuvers
+        tracks.append(simulate_track(rng, mode, random_radar(rng), TARGET))
+    return {"random": (*tracks_to_tensors(tracks), noise_scales(tracks))}
 
 
 def pool(sets):
@@ -66,6 +77,7 @@ def main():
     ap.add_argument("--lr", type = float, default = 1e-3)
     ap.add_argument("--hidden", type = int, default = 64, help = "GRU memory size")
     ap.add_argument("--layers", type = int, default = 1, help = "stacked GRU layers")
+    ap.add_argument("--randomize", action = "store_true", help = "train on random radar settings")
     ap.add_argument("--name", default = "gru_tracker", help = "checkpoint name in outputs/")
     args = ap.parse_args()
     OUT_DIR.mkdir(exist_ok = True)
@@ -74,7 +86,10 @@ def main():
 
     # Train & Validation use different seeds -> different tracks
     # (The Baseline's test seed is 42, so none of these overlap with it)
-    train = pool(make_data(args.n, seed = 1000))
+    if args.randomize:   # same number of tracks as the fixed scenarios, but varied conditions
+        train = pool(make_random_data(args.n * len(SCENARIOS), seed = 1000))
+    else:
+        train = pool(make_data(args.n, seed = 1000))
     val_sets = make_data(args.n // 4, seed = 2000)
     val_feats, val_base, val_truth, val_scale = pool(val_sets)
     loader = DataLoader(TensorDataset(*train), batch_size = args.batch, shuffle = True)
