@@ -4,7 +4,6 @@
     python run_baseline.py --tracks 1000
 """
 import argparse
-from pathlib import Path
 
 import matplotlib
 matplotlib.use("Agg")
@@ -13,9 +12,9 @@ import numpy as np
 
 from tracker.kalman import ConstantVelocityKF
 from tracker.metrics import evaluate, raw_measurement_error, rmse_over_tracks
+from tracker.paths import OUT_DIR as OUT
 from tracker.scenarios import BASE_RADAR, Q_VAL, SCENARIOS, TARGET
 from tracker.simulate import simulate_batch
-OUT = Path("outputs")
 
 
 

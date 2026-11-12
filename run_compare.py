@@ -8,6 +8,7 @@ from tracker.dataset import tracks_to_tensors
 from tracker.kalman import ConstantVelocityKF
 from tracker.metrics import evaluate, raw_measurement_error, rmse_over_tracks
 from tracker.neural import GRUTracker
+from tracker.paths import CHECKPOINT
 from tracker.scenarios import Q_VAL, SCENARIOS, TARGET
 from tracker.simulate import simulate_batch
 
@@ -27,7 +28,7 @@ def main():
     args = ap.parse_args()
 
     model = GRUTracker()
-    model.load_state_dict(torch.load("outputs/gru_tracker.pt"))
+    model.load_state_dict(torch.load(CHECKPOINT))
     model.eval()
 
     lbl = ["raw radar"] + [f"KF q = {q:g}" for q in Q_VAL] + ["GRU"]

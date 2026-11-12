@@ -1,6 +1,5 @@
 """Train GRU Tracker on Simulated Tracks."""
 import argparse
-from pathlib import Path
 
 import torch
 from torch import nn
@@ -9,10 +8,9 @@ from torch.utils.data import DataLoader,TensorDataset
 from tracker.dataset import OUT_SCALE, tracks_to_tensors
 from tracker.metrics import BURN_IN
 from tracker.neural import GRUTracker
+from tracker.paths import CHECKPOINT, OUT_DIR
 from tracker.scenarios import SCENARIOS, TARGET
 from tracker.simulate import simulate_batch
-
-OUT = Path("outputs")
 
 def make_data(n_per_scenario: int, seed: int):
     """Simulate n tracks for every scenario so the model sees all situations"""
@@ -40,7 +38,7 @@ def main():
     ap.add_argument("--batch", type = int, default = 64)
     ap.add_argument("--lr", type = float, default = 1e-3)
     args = ap.parse_args()
-    OUT.mkdir(exist_ok = True)
+    OUT_DIR.mkdir(exist_ok = True)
     torch.manual_seed(0)
 
     # Train & Validation use different seeds -> different tracks
@@ -79,7 +77,7 @@ def main():
         marker = ""
         if val_loss < best:
             best = val_loss
-            torch.save(model.state_dict(), OUT / "gru_tracker.pt")
+            torch.save(model.state_dict(), CHECKPOINT)
             marker = " <- saved"
 
         print(f"epoch {epoch:3d}  train RMSE {train_loss ** 0.5 * OUT_SCALE:7.1f} m"
