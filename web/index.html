@@ -1,0 +1,398 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Radar Tracker Demo</title>
+<meta name="description" content="Watch a Kalman filter and a learned GRU clean up noisy radar plots of a maneuvering aircraft.">
+<style>
+  :root {
+    --bg: #f6f7f9; --panel: #ffffff; --ink: #14181f; --muted: #5b6573; --line: #dde1e7;
+    --truth: #14181f; --plots: #c2410c; --kf: #1d6fd8; --gru: #0e9f6e; --raw: #8a93a1;
+    --radar: #7c3aed;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      --bg: #0e1116; --panel: #161b22; --ink: #e8ecf2; --muted: #98a2b3; --line: #2a313c;
+      --truth: #e8ecf2; --plots: #fb923c; --kf: #5aa2ff; --gru: #34d399; --raw: #7d8696;
+      --radar: #a78bfa;
+    }
+  }
+  :root[data-theme="dark"] {
+    --bg: #0e1116; --panel: #161b22; --ink: #e8ecf2; --muted: #98a2b3; --line: #2a313c;
+    --truth: #e8ecf2; --plots: #fb923c; --kf: #5aa2ff; --gru: #34d399; --raw: #7d8696;
+    --radar: #a78bfa;
+  }
+  * { box-sizing: border-box; }
+  html { color-scheme: light dark; }
+  :root[data-theme="light"] { color-scheme: light; }
+  :root[data-theme="dark"] { color-scheme: dark; }
+  body {
+    margin: 0; background: var(--bg); color: var(--ink);
+    font: 16px/1.5 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  }
+  .wrap { max-width: 1040px; margin: 0 auto; padding: 24px 16px 64px; }
+  header { margin-bottom: 20px; }
+  h1 { font-size: 1.6rem; margin: 0 0 4px; letter-spacing: -0.01em; }
+  header p { margin: 0; color: var(--muted); max-width: 62ch; }
+  h2 { font-size: 1.05rem; margin: 0 0 4px; }
+  .panel { background: var(--panel); border: 1px solid var(--line); border-radius: 12px; padding: 16px; margin-bottom: 16px; }
+  .sub { color: var(--muted); font-size: 0.9rem; margin: 0 0 12px; }
+
+  .tabs { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 8px; }
+  button, select {
+    font: inherit; color: var(--ink); background: var(--panel); border: 1px solid var(--line);
+    border-radius: 8px; padding: 6px 12px; cursor: pointer;
+  }
+  button:hover { border-color: var(--muted); }
+  button:focus-visible, select:focus-visible, input:focus-visible { outline: 2px solid var(--kf); outline-offset: 2px; }
+  button[aria-pressed="true"], button[aria-selected="true"] { background: var(--ink); color: var(--bg); border-color: var(--ink); }
+
+  .stage { position: relative; }
+  canvas { display: block; width: 100%; border-radius: 8px; background: color-mix(in srgb, var(--bg) 60%, var(--panel)); }
+  #main { height: 420px; touch-action: none; }
+  #err { height: 150px; margin-top: 12px; }
+  .badge {
+    position: absolute; left: 10px; top: 10px; background: var(--panel); border: 1px solid var(--line);
+    border-radius: 6px; padding: 2px 8px; font-size: 0.8rem; color: var(--muted);
+  }
+  .badge.miss { color: var(--plots); border-color: var(--plots); }
+
+  .controls { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; margin-top: 12px; }
+  .controls input[type=range] { flex: 1 1 200px; min-width: 120px; }
+  .legend { display: flex; flex-wrap: wrap; gap: 8px 16px; margin: 4px 0 12px; }
+  .legend label { display: inline-flex; align-items: center; gap: 6px; cursor: pointer; font-size: 0.92rem; }
+  .sw { width: 12px; height: 12px; border-radius: 3px; display: inline-block; }
+  .qpick { display: inline-flex; gap: 4px; align-items: center; margin-left: 4px; }
+  .qpick button { padding: 1px 8px; font-size: 0.82rem; border-radius: 6px; }
+
+  .cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 12px; margin-top: 12px; }
+  .card { border: 1px solid var(--line); border-radius: 10px; padding: 10px 12px; }
+  .card .name { display: flex; align-items: center; gap: 8px; font-weight: 600; font-size: 0.95rem; }
+  .card .big { font-size: 1.5rem; font-variant-numeric: tabular-nums; }
+  .card .small { color: var(--muted); font-size: 0.85rem; font-variant-numeric: tabular-nums; }
+
+  .verdict { margin: 12px 0 0; padding: 10px 12px; border-left: 3px solid var(--gru); background: color-mix(in srgb, var(--gru) 8%, transparent); border-radius: 0 8px 8px 0; }
+
+  .bars { display: grid; gap: 18px; }
+  .group { cursor: pointer; border-radius: 8px; padding: 6px 8px; margin: -6px -8px; }
+  .group.current { background: color-mix(in srgb, var(--kf) 8%, transparent); }
+  .group h3 { margin: 0 0 6px; font-size: 0.95rem; }
+  .row { display: grid; grid-template-columns: 90px 1fr 70px; align-items: center; gap: 8px; font-size: 0.85rem; margin: 3px 0; }
+  .row .track { height: 12px; background: var(--line); border-radius: 6px; overflow: hidden; }
+  .row .fill { height: 100%; border-radius: 6px; }
+  .row .val { text-align: right; font-variant-numeric: tabular-nums; color: var(--muted); }
+  .row.best .val { color: var(--ink); font-weight: 700; }
+  .note { color: var(--muted); font-size: 0.85rem; margin-top: 10px; }
+
+  .topbar { display: flex; justify-content: space-between; align-items: flex-start; gap: 12px; }
+  noscript { color: var(--plots); }
+  @media (max-width: 560px) {
+    #main { height: 320px; }
+    .row { grid-template-columns: 70px 1fr 60px; }
+  }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header class="topbar">
+    <div>
+      <h1>Cleaning up noisy radar</h1>
+      <p>A radar sees a maneuvering aircraft only through noisy dots. Watch a classic Kalman filter and a small neural network (a GRU) try to recover the true flight path from those dots.</p>
+    </div>
+    <button id="theme" type="button" aria-label="Toggle light and dark theme">Theme</button>
+  </header>
+  <noscript>This demo needs JavaScript.</noscript>
+
+  <section class="panel" aria-labelledby="demo-h">
+    <h2 id="demo-h">Live replay</h2>
+    <p class="sub" id="blurb"></p>
+    <div class="tabs" role="tablist" aria-label="Scenario" id="tabs"></div>
+
+    <div class="legend" id="legend"></div>
+
+    <div class="stage">
+      <canvas id="main" role="img" aria-label="Top-down view of the aircraft's true path, the noisy radar plots, and the Kalman and GRU estimates"></canvas>
+      <div class="badge" id="badge"></div>
+    </div>
+    <canvas id="err" role="img" aria-label="Position error over time for raw radar, Kalman filter and GRU"></canvas>
+
+    <div class="controls">
+      <button id="play" type="button">Pause</button>
+      <input id="scrub" type="range" min="0" max="119" value="0" aria-label="Scan number">
+      <span id="scanlabel" class="sub" style="margin:0;min-width:7ch"></span>
+      <button id="next" type="button">New track</button>
+    </div>
+
+    <div class="cards" id="cards"></div>
+    <p class="verdict" id="verdict"></p>
+  </section>
+
+  <section class="panel" aria-labelledby="bars-h">
+    <h2 id="bars-h">Which one wins?</h2>
+    <p class="sub">Average position error in metres over 500 unseen tracks per scenario (lower is better). Click a scenario to replay it above.</p>
+    <div class="bars" id="bars"></div>
+    <p class="note">Bars are capped at 700 m. A Kalman filter tuned for straight flight (q=0.1) is far worse than the raw radar in turns, which is why one fixed setting never wins everywhere. The GRU never saw these tracks during training.</p>
+  </section>
+</div>
+
+<script src="data.js"></script>
+<script>
+"use strict";
+(() => {
+  const D = window.DEMO;
+  if (!D) { document.body.insertAdjacentHTML("afterbegin", "<p style='padding:16px'>Missing data.js. Run <code>python export_demo.py</code>.</p>"); return; }
+
+  const $ = (id) => document.getElementById(id);
+  const css = (name) => getComputedStyle(document.documentElement).getPropertyValue(name).trim();
+  const reduceMotion = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+  const SCANS_PER_SEC = 6;
+  const BAR_CAP = 700;
+  const NICE = { straight: "Straight", turning: "Turning", maneuvers: "Maneuvers", noisy: "Noisy radar", missed_30: "30% missed scans" };
+
+  const state = { scn: 0, trk: 0, q: D.qs[1], t: 0, playing: !reduceMotion,
+                  show: { truth: true, plots: true, kf: true, gru: true } };
+  let prepared = null, view = null, last = 0;
+
+  const dist = (a, b) => Math.hypot(a[0] - b[0], a[1] - b[1]);
+
+  // ---- per-track precompute: errors for each method, forward-filled raw radar ----
+  function prepare(track) {
+    const T = track.truth.length;
+    const rawErr = [], rawPos = [];
+    let lastPlot = track.meas[0];
+    for (let k = 0; k < T; k++) {
+      if (track.meas[k]) lastPlot = track.meas[k];
+      rawPos.push(lastPlot);
+      rawErr.push(dist(lastPlot, track.truth[k]));
+    }
+    const kfErr = {};
+    for (const q of D.qs) kfErr[q] = track.kf[q].map((p, k) => dist(p, track.truth[k]));
+    const gruErr = track.gru.map((p, k) => dist(p, track.truth[k]));
+    return { T, track, rawErr, kfErr, gruErr };
+  }
+
+  function runningRmse(errs, upto) {
+    if (upto < D.burnIn) return null;
+    let s = 0, n = 0;
+    for (let k = D.burnIn; k <= upto; k++) { s += errs[k] * errs[k]; n++; }
+    return Math.sqrt(s / n);
+  }
+
+  // ---- canvas helpers ----
+  function fit(canvas) {
+    const dpr = window.devicePixelRatio || 1;
+    const w = canvas.clientWidth, h = canvas.clientHeight;
+    if (canvas.width !== Math.round(w * dpr) || canvas.height !== Math.round(h * dpr)) {
+      canvas.width = Math.round(w * dpr); canvas.height = Math.round(h * dpr);
+    }
+    const ctx = canvas.getContext("2d");
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    return { ctx, w, h };
+  }
+
+  function computeView(w, h) {
+    const tr = prepared.track;
+    let x0 = Infinity, x1 = -Infinity, y0 = Infinity, y1 = -Infinity;
+    const add = (p) => { if (!p) return; x0 = Math.min(x0, p[0]); x1 = Math.max(x1, p[0]); y0 = Math.min(y0, p[1]); y1 = Math.max(y1, p[1]); };
+    tr.truth.forEach(add); tr.meas.forEach(add); tr.gru.forEach(add);
+    const pad = 36;
+    const bw = Math.max(x1 - x0, 1), bh = Math.max(y1 - y0, 1);
+    const s = Math.min((w - 2 * pad) / bw, (h - 2 * pad) / bh);
+    const cx = (x0 + x1) / 2, cy = (y0 + y1) / 2;
+    return { s, cx, cy, w, h, X: (p) => w / 2 + (p[0] - cx) * s, Y: (p) => h / 2 - (p[1] - cy) * s };
+  }
+
+  function path(ctx, pts, upto, V) {
+    ctx.beginPath();
+    for (let k = 0; k <= upto; k++) { const x = V.X(pts[k]), y = V.Y(pts[k]); k ? ctx.lineTo(x, y) : ctx.moveTo(x, y); }
+    ctx.stroke();
+  }
+
+  function dot(ctx, p, V, r, color) {
+    ctx.fillStyle = color; ctx.beginPath(); ctx.arc(V.X(p), V.Y(p), r, 0, 7); ctx.fill();
+  }
+
+  function drawMain() {
+    const { ctx, w, h } = fit($("main"));
+    ctx.clearRect(0, 0, w, h);
+    const V = view = computeView(w, h);
+    const tr = prepared.track, T = Math.floor(state.t);
+    ctx.lineJoin = "round"; ctx.lineCap = "round";
+
+    if (state.show.truth) {            // whole path faint, travelled part solid
+      ctx.strokeStyle = css("--truth"); ctx.lineWidth = 1; ctx.globalAlpha = 0.18; ctx.setLineDash([4, 5]);
+      path(ctx, tr.truth, tr.truth.length - 1, V);
+      ctx.setLineDash([]); ctx.globalAlpha = 1; ctx.lineWidth = 2; path(ctx, tr.truth, T, V);
+    }
+    if (state.show.plots) {
+      for (let k = 0; k <= T; k++) if (tr.meas[k]) {
+        ctx.globalAlpha = k === T ? 1 : 0.25 + 0.5 * (k / Math.max(T, 1));
+        dot(ctx, tr.meas[k], V, k === T ? 4 : 2.6, css("--plots"));
+      }
+      ctx.globalAlpha = 1;
+    }
+    if (state.show.kf) {
+      ctx.strokeStyle = css("--kf"); ctx.lineWidth = 2.2; path(ctx, tr.kf[state.q], T, V);
+      dot(ctx, tr.kf[state.q][T], V, 5, css("--kf"));
+    }
+    if (state.show.gru) {
+      ctx.strokeStyle = css("--gru"); ctx.lineWidth = 2.2; path(ctx, tr.gru, T, V);
+      dot(ctx, tr.gru[T], V, 5, css("--gru"));
+    }
+    if (state.show.truth) dot(ctx, tr.truth[T], V, 4, css("--truth"));
+
+    // scale bar
+    const target = w * 0.22 / V.s, steps = [100, 200, 500, 1000, 2000, 5000, 10000, 20000];
+    const len = steps.filter((m) => m <= target).pop() || 100, px = len * V.s;
+    ctx.strokeStyle = css("--muted"); ctx.fillStyle = css("--muted"); ctx.lineWidth = 2;
+    ctx.beginPath(); ctx.moveTo(w - 16 - px, h - 18); ctx.lineTo(w - 16, h - 18); ctx.stroke();
+    ctx.font = "12px system-ui, sans-serif"; ctx.textAlign = "right";
+    ctx.fillText(len >= 1000 ? `${len / 1000} km` : `${len} m`, w - 16, h - 24);
+
+    const miss = !tr.meas[T];
+    const b = $("badge");
+    b.textContent = miss ? "No radar return this scan" : "Radar return received";
+    b.classList.toggle("miss", miss);
+  }
+
+  function drawErr() {
+    const { ctx, w, h } = fit($("err"));
+    ctx.clearRect(0, 0, w, h);
+    const P = prepared, T = Math.floor(state.t);
+    const series = [[P.rawErr, css("--raw"), 1.4, true], [P.kfErr[state.q], css("--kf"), 2, state.show.kf],
+                    [P.gruErr, css("--gru"), 2, state.show.gru]];
+    let max = 50;
+    for (const [e, , , on] of series) if (on) max = Math.max(max, ...e);
+    max = Math.ceil(max / 50) * 50;
+    const L = 44, R = 8, Tp = 8, B = 22, pw = w - L - R, ph = h - Tp - B;
+    const X = (k) => L + (k / (P.T - 1)) * pw, Y = (v) => Tp + ph - (v / max) * ph;
+
+    ctx.strokeStyle = css("--line"); ctx.fillStyle = css("--muted"); ctx.lineWidth = 1;
+    ctx.font = "11px system-ui, sans-serif"; ctx.textAlign = "right";
+    for (const f of [0, 0.5, 1]) { const y = Y(max * f); ctx.beginPath(); ctx.moveTo(L, y); ctx.lineTo(w - R, y); ctx.stroke(); ctx.fillText(Math.round(max * f) + " m", L - 6, y + 4); }
+    ctx.textAlign = "center"; ctx.fillText("scan", L + pw / 2, h - 4);
+    // burn-in note
+    ctx.fillStyle = css("--line"); ctx.globalAlpha = 0.5; ctx.fillRect(L, Tp, X(D.burnIn) - L, ph); ctx.globalAlpha = 1;
+
+    ctx.lineWidth = 2; ctx.lineJoin = "round";
+    for (const [e, c, lw, on] of series) {
+      if (!on) continue;
+      ctx.strokeStyle = c; ctx.lineWidth = lw; ctx.beginPath();
+      for (let k = 0; k <= T; k++) k ? ctx.lineTo(X(k), Y(e[k])) : ctx.moveTo(X(k), Y(e[k]));
+      ctx.stroke();
+    }
+    ctx.strokeStyle = css("--muted"); ctx.lineWidth = 1; ctx.beginPath(); ctx.moveTo(X(T), Tp); ctx.lineTo(X(T), Tp + ph); ctx.stroke();
+  }
+
+  function updateCards() {
+    const P = prepared, T = Math.floor(state.t);
+    const items = [["Raw radar", "--raw", P.rawErr], [`Kalman filter (q=${state.q})`, "--kf", P.kfErr[state.q]], ["GRU", "--gru", P.gruErr]];
+    $("cards").innerHTML = items.map(([name, col, e]) => {
+      const r = runningRmse(e, T);
+      return `<div class="card"><div class="name"><span class="sw" style="background:var(${col})"></span>${name}</div>
+        <div class="big">${Math.round(e[T])} m</div>
+        <div class="small">error now · avg so far ${r === null ? "—" : Math.round(r) + " m"}</div></div>`;
+    }).join("");
+    $("scanlabel").textContent = `scan ${T + 1}/${P.T}`;
+    $("scrub").value = T;
+  }
+
+  function updateVerdict() {
+    const s = D.scenarios[state.scn].rmse;
+    const cands = [["raw radar", s.raw]];
+    for (const q of D.qs) cands.push([`Kalman filter (q=${q})`, s.kf[q]]);
+    cands.push(["the GRU", s.gru]);
+    const best = cands.reduce((a, b) => (b[1] < a[1] ? b : a));
+    const bestKf = Math.min(...D.qs.map((q) => s.kf[q]));
+    const gruWins = s.gru <= bestKf;
+    $("verdict").innerHTML = `<strong>${NICE[D.scenarios[state.scn].id]}:</strong> best average error is <strong>${best[0]}</strong> at ${Math.round(best[1])} m. ` +
+      (gruWins ? `The GRU beats every Kalman setting shown, with no tuning needed.`
+               : `A well-tuned Kalman filter still beats the GRU here (${Math.round(bestKf)} m vs ${Math.round(s.gru)} m).`);
+  }
+
+  function buildBars() {
+    $("bars").innerHTML = D.scenarios.map((sc, i) => {
+      const r = sc.rmse;
+      const rows = [["Raw radar", r.raw, "--raw"], ...D.qs.map((q) => [`Kalman q=${q}`, r.kf[q], "--kf"]), ["GRU", r.gru, "--gru"]];
+      const min = Math.min(...rows.map((x) => x[1]));
+      return `<div class="group" data-i="${i}" tabindex="0" role="button" aria-label="Replay ${NICE[sc.id]}"><h3>${NICE[sc.id]}</h3>` +
+        rows.map(([n, v, c]) => `<div class="row${v === min ? " best" : ""}"><span>${n}</span>
+          <span class="track"><span class="fill" style="display:block;width:${Math.min(v / BAR_CAP, 1) * 100}%;background:var(${c})"></span></span>
+          <span class="val">${Math.round(v)} m${v === min ? " ★" : ""}</span></div>`).join("") + `</div>`;
+    }).join("");
+    document.querySelectorAll(".group").forEach((g) => {
+      const go = () => { selectScenario(+g.dataset.i); $("demo-h").scrollIntoView({ behavior: reduceMotion ? "auto" : "smooth" }); };
+      g.addEventListener("click", go);
+      g.addEventListener("keydown", (e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); go(); } });
+    });
+    markCurrent();
+  }
+  const markCurrent = () => document.querySelectorAll(".group").forEach((g) => g.classList.toggle("current", +g.dataset.i === state.scn));
+
+  function buildTabs() {
+    $("tabs").innerHTML = D.scenarios.map((sc, i) =>
+      `<button type="button" role="tab" data-i="${i}" aria-selected="${i === state.scn}">${NICE[sc.id]}</button>`).join("");
+    document.querySelectorAll("#tabs button").forEach((b) => b.addEventListener("click", () => selectScenario(+b.dataset.i)));
+  }
+
+  function buildLegend() {
+    const mk = (key, col, label) => `<label><input type="checkbox" data-k="${key}" checked><span class="sw" style="background:var(${col})"></span>${label}</label>`;
+    $("legend").innerHTML = mk("truth", "--truth", "True path") + mk("plots", "--plots", "Radar plots (noisy)") +
+      mk("kf", "--kf", "Kalman filter") +
+      `<span class="qpick" aria-label="Kalman q setting">q = ${D.qs.map((q) => `<button type="button" data-q="${q}" aria-pressed="${q === state.q}">${q}</button>`).join("")}</span>` +
+      mk("gru", "--gru", "GRU (learned)");
+    document.querySelectorAll("#legend input").forEach((c) => c.addEventListener("change", () => { state.show[c.dataset.k] = c.checked; draw(); }));
+    document.querySelectorAll(".qpick button").forEach((b) => b.addEventListener("click", () => {
+      state.q = b.dataset.q;
+      document.querySelectorAll(".qpick button").forEach((x) => x.setAttribute("aria-pressed", x.dataset.q === state.q));
+      draw();
+    }));
+  }
+
+  function load() {
+    prepared = prepare(D.scenarios[state.scn].tracks[state.trk]);
+    state.t = 0; state.playing = !reduceMotion; $("play").textContent = state.playing ? "Pause" : "Play";
+    $("scrub").max = prepared.T - 1;
+    draw();
+  }
+
+  function selectScenario(i) {
+    state.scn = i; state.trk = 0;
+    $("blurb").textContent = D.scenarios[i].blurb;
+    document.querySelectorAll("#tabs button").forEach((b) => b.setAttribute("aria-selected", +b.dataset.i === i));
+    markCurrent(); updateVerdict(); load();
+  }
+
+  function draw() { drawMain(); drawErr(); updateCards(); }
+
+  function frame(now) {
+    const dt = Math.min((now - last) / 1000, 0.1); last = now;
+    if (state.playing) {
+      state.t += dt * SCANS_PER_SEC;
+      if (state.t >= prepared.T - 1) { state.t = prepared.T - 1; state.playing = false; $("play").textContent = "Replay"; }
+      draw();
+    }
+    requestAnimationFrame(frame);
+  }
+
+  $("play").addEventListener("click", () => {
+    if (state.t >= prepared.T - 1) state.t = 0;
+    state.playing = !state.playing; $("play").textContent = state.playing ? "Pause" : "Play"; draw();
+  });
+  $("scrub").addEventListener("input", (e) => { state.playing = false; $("play").textContent = "Play"; state.t = +e.target.value; draw(); });
+  $("next").addEventListener("click", () => { state.trk = (state.trk + 1) % D.scenarios[state.scn].tracks.length; load(); });
+  $("theme").addEventListener("click", () => {
+    const dark = matchMedia("(prefers-color-scheme: dark)").matches;
+    const cur = document.documentElement.dataset.theme || (dark ? "dark" : "light");
+    document.documentElement.dataset.theme = cur === "dark" ? "light" : "dark"; draw();
+  });
+  window.addEventListener("resize", draw);
+  matchMedia("(prefers-color-scheme: dark)").addEventListener("change", draw);
+
+  buildTabs(); buildLegend(); buildBars(); selectScenario(0);
+  requestAnimationFrame((t) => { last = t; frame(t); });
+})();
+</script>
+</body>
+</html>
