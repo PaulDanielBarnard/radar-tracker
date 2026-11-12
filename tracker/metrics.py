@@ -3,13 +3,15 @@ import numpy as np
 
 from .simulate import forward_fill
 
+BURN_IN = 10  # initial scans ignored while a tracker settles
+
 
 def position_error(est: np.ndarray, truth: np.ndarray) -> np.ndarray:
     """Euclidean position error per time step. Both arrays are (T, >=2)."""
     return np.linalg.norm(est[:, :2] - truth[:, :2], axis=1)
 
 
-def rmse_over_tracks(errors: np.ndarray, burn_in: int = 10) -> float:
+def rmse_over_tracks(errors: np.ndarray, burn_in: int = BURN_IN) -> float:
     """errors: (n_tracks, T). RMSE over all tracks after an initial settling period."""
     return float(np.sqrt(np.mean(errors[:, burn_in:] ** 2)))
 

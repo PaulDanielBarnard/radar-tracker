@@ -7,6 +7,7 @@ from torch import nn
 from torch.utils.data import DataLoader,TensorDataset
 
 from tracker.dataset import OUT_SCALE, tracks_to_tensors
+from tracker.metrics import BURN_IN
 from tracker.neural import GRUTracker
 from tracker.scenarios import SCENARIOS, TARGET
 from tracker.simulate import simulate_batch
@@ -26,6 +27,11 @@ def loss_fn(pred, truth):
     """Mean squared pos error, in units of OUT_SCALE (So numbers stay near 0-1)"""
     return (((pred - truth) / OUT_SCALE) ** 2).mean()
 
+
+def settled_loss(pred, truth):
+    """Same as loss_fn but skips the first BURN_IN scans, matching rmse_over_tracks."""
+    return loss_fn(pred[:, BURN_IN:], truth[:, BURN_IN:])
+
 def main():
 
     ap = argparse.ArgumentParser()
@@ -43,7 +49,7 @@ def main():
     val_feats, val_base, val_truth = make_data(args.n // 4, seed = 2000)
     loader = DataLoader(TensorDataset(*train), batch_size = args.batch, shuffle = True)
 
-    raw_rmse = loss_fn(val_base, val_truth).sqrt().item() * OUT_SCALE
+    raw_rmse = settled_loss(val_base, val_truth).sqrt().item() * OUT_SCALE
     print(f"Validation RMSE of Raw Radar (The Num to beat): {raw_rmse:.1f} m\n")
 
     model = GRUTracker()
@@ -68,7 +74,7 @@ def main():
 
         model.eval()
         with torch.no_grad():
-            val_loss = loss_fn(model(val_feats, val_base), val_truth).item()
+            val_loss = settled_loss(model(val_feats, val_base), val_truth).item()
 
         marker = ""
         if val_loss < best:
