@@ -6,8 +6,8 @@ import torch
 
 from tracker.kalman import ConstantVelocityKF
 from tracker.metrics import evaluate, raw_measurement_error, rmse_over_tracks
-from tracker.neural import GRUTracker, gru_estimates
-from tracker.paths import CHECKPOINT
+from tracker.neural import gru_estimates, load_model
+from tracker.paths import checkpoint
 from tracker.scenarios import Q_VAL, SCENARIOS, TARGET
 from tracker.simulate import simulate_batch
 
@@ -20,14 +20,13 @@ def main():
 
     ap = argparse.ArgumentParser()
     ap.add_argument("--tracks", type = int, default = 500)
+    ap.add_argument("--model", default = "gru_tracker", help = "checkpoint name in outputs/")
     args = ap.parse_args()
 
-    if not CHECKPOINT.exists():
-        raise SystemExit(f"No trained model at {CHECKPOINT}. Run `python train_neural.py` first.")
-
-    model = GRUTracker()
-    model.load_state_dict(torch.load(CHECKPOINT, map_location="cpu", weights_only=True))
-    model.eval()
+    ckpt = checkpoint(args.model)
+    if not ckpt.exists():
+        raise SystemExit(f"No trained model at {ckpt}. Run `python train_neural.py` first.")
+    model = load_model(ckpt)
 
     lbl = ["raw radar"] + [f"KF q = {q:g}" for q in Q_VAL] + ["GRU"]
     hdr = f"{'scenario':<12}" + "".join(f"{lab:>12}" for lab in lbl)

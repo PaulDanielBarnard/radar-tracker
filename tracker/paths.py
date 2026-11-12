@@ -3,4 +3,8 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 OUT_DIR = ROOT / "outputs"
-CHECKPOINT = OUT_DIR / "gru_tracker.pt"
+CHECKPOINT = OUT_DIR / "gru_tracker.pt"   # default model
+
+
+def checkpoint(name: str = "gru_tracker") -> Path:
+    return OUT_DIR / f"{name}.pt"

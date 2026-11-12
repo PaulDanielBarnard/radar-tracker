@@ -7,8 +7,8 @@ from torch.utils.data import DataLoader,TensorDataset
 
 from tracker.dataset import OUT_SCALE, tracks_to_tensors
 from tracker.metrics import BURN_IN
-from tracker.neural import GRUTracker
-from tracker.paths import CHECKPOINT, OUT_DIR
+from tracker.neural import GRUTracker, load_model, save_model
+from tracker.paths import OUT_DIR, checkpoint
 from tracker.scenarios import SCENARIOS, TARGET
 from tracker.simulate import simulate_batch
 
@@ -56,8 +56,12 @@ def main():
     ap.add_argument("--n", type = int, default = 400, help = "Training tracks per scenario")
     ap.add_argument("--batch", type = int, default = 64)
     ap.add_argument("--lr", type = float, default = 1e-3)
+    ap.add_argument("--hidden", type = int, default = 64, help = "GRU memory size")
+    ap.add_argument("--layers", type = int, default = 1, help = "stacked GRU layers")
+    ap.add_argument("--name", default = "gru_tracker", help = "checkpoint name in outputs/")
     args = ap.parse_args()
     OUT_DIR.mkdir(exist_ok = True)
+    ckpt = checkpoint(args.name)
     torch.manual_seed(0)
 
     # Train & Validation use different seeds -> different tracks
@@ -70,7 +74,7 @@ def main():
     raw_rmse = settled_loss(val_base, val_truth).sqrt().item() * OUT_SCALE
     print(f"Validation RMSE of Raw Radar (The Num to beat): {raw_rmse:.1f} m\n")
 
-    model = GRUTracker()
+    model = GRUTracker(hidden = args.hidden, layers = args.layers)
     opt = torch.optim.Adam(model.parameters(), lr = args.lr)
     best = float("inf")
 
@@ -97,13 +101,13 @@ def main():
         marker = ""
         if val_loss < best:
             best = val_loss
-            torch.save(model.state_dict(), CHECKPOINT)
+            save_model(model, ckpt)
             marker = " <- saved"
 
         print(f"epoch {epoch:3d}  train RMSE {train_loss ** 0.5 * OUT_SCALE:7.1f} m"
               f"    val RMSE {val_loss ** 0.5 * OUT_SCALE:7.1f} m{marker}")
 
-    model.load_state_dict(torch.load(CHECKPOINT, weights_only=True))   # reload the best epoch
+    model = load_model(ckpt)   # reload the best epoch
     report_by_scenario(model, val_sets)
 
 

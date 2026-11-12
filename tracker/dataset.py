@@ -6,9 +6,10 @@ from .simulate import forward_fill
 
 POS_SCALE = 50_000.0   # metres: puts positions roughly in [-1, 1]
 VEL_SCALE = 300.0      # metres per scan: typical movement between scans
+N_FEATURES = 5          # columns per scan fed to the network
 OUT_SCALE = 1000.0     # metres: the network's output unit (1.0 = 1 km correction)
 
-def track_to_arr(track):
+def track_to_arr(track, hybrid=False):
     filled = forward_fill(track)
     step = np.zeros_like(filled) # How Far plot moved since last scan
     step[1:] = filled[1:] - filled[:-1]
@@ -19,7 +20,7 @@ def track_to_arr(track):
         ], axis = 1)    # shape (T, 5)
     return feat,filled,track.truth[:, :2]
 
-def tracks_to_tensors(tracks):
-    feats, bases, truths = zip(*(track_to_arr(t) for t in tracks))
+def tracks_to_tensors(tracks, hybrid=False):
+    feats, bases, truths = zip(*(track_to_arr(t, hybrid) for t in tracks))
     to_t = lambda a: torch.tensor( np.stack(a), dtype = torch.float32)
     return to_t(feats), to_t(bases), to_t(truths)
