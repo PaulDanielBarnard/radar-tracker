@@ -13,13 +13,18 @@ from tracker.scenarios import SCENARIOS, TARGET
 from tracker.simulate import simulate_batch
 
 def make_data(n_per_scenario: int, seed: int):
-    """Simulate n tracks for every scenario so the model sees all situations"""
-    tracks = []
-    
-    for i, (mode, radar) in enumerate(SCENARIOS.values()):
-        tracks += simulate_batch(n_per_scenario, mode, radar, TARGET, seed = seed + i)
+    """Simulate n tracks for every scenario. Returns {scenario name: tensors}."""
+    sets = {}
+    for i, (name, (mode, radar)) in enumerate(SCENARIOS.items()):
+        tracks = simulate_batch(n_per_scenario, mode, radar, TARGET, seed = seed + i)
+        sets[name] = tracks_to_tensors(tracks)
+    return sets
 
-    return tracks_to_tensors(tracks)
+
+def pool(sets):
+    """Stack every scenario's (feats, base, truth) into one training set."""
+    return tuple(torch.cat(parts) for parts in zip(*sets.values()))
+
 
 def loss_fn(pred, truth):
     """Mean squared pos error, in units of OUT_SCALE (So numbers stay near 0-1)"""
@@ -29,6 +34,20 @@ def loss_fn(pred, truth):
 def settled_loss(pred, truth):
     """Same as loss_fn but skips the first BURN_IN scans, matching rmse_over_tracks."""
     return loss_fn(pred[:, BURN_IN:], truth[:, BURN_IN:])
+
+def rmse_m(pred, truth):
+    """Burn-in-adjusted RMSE in metres."""
+    return settled_loss(pred, truth).sqrt().item() * OUT_SCALE
+
+
+def report_by_scenario(model, val_sets):
+    """Show where the model beats raw radar and where it does not."""
+    model.eval()
+    print(f"\n{'scenario':<12}{'raw radar':>11}{'GRU':>10}")
+    with torch.no_grad():
+        for name, (feats, base, truth) in val_sets.items():
+            print(f"{name:<12}{rmse_m(base, truth):>11.1f}{rmse_m(model(feats, base), truth):>10.1f}")
+
 
 def main():
 
@@ -43,8 +62,9 @@ def main():
 
     # Train & Validation use different seeds -> different tracks
     # (The Baseline's test seed is 42, so none of these overlap with it)
-    train = make_data(args.n, seed = 1000)
-    val_feats, val_base, val_truth = make_data(args.n // 4, seed = 2000)
+    train = pool(make_data(args.n, seed = 1000))
+    val_sets = make_data(args.n // 4, seed = 2000)
+    val_feats, val_base, val_truth = pool(val_sets)
     loader = DataLoader(TensorDataset(*train), batch_size = args.batch, shuffle = True)
 
     raw_rmse = settled_loss(val_base, val_truth).sqrt().item() * OUT_SCALE
@@ -82,6 +102,9 @@ def main():
 
         print(f"epoch {epoch:3d}  train RMSE {train_loss ** 0.5 * OUT_SCALE:7.1f} m"
               f"    val RMSE {val_loss ** 0.5 * OUT_SCALE:7.1f} m{marker}")
+
+    model.load_state_dict(torch.load(CHECKPOINT))   # reload the best epoch
+    report_by_scenario(model, val_sets)
 
 
 if __name__ == "__main__":
