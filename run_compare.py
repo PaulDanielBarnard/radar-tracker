@@ -27,8 +27,11 @@ def main():
     ap.add_argument("--tracks", type = int, default = 500)
     args = ap.parse_args()
 
+    if not CHECKPOINT.exists():
+        raise SystemExit(f"No trained model at {CHECKPOINT}. Run `python train_neural.py` first.")
+
     model = GRUTracker()
-    model.load_state_dict(torch.load(CHECKPOINT))
+    model.load_state_dict(torch.load(CHECKPOINT, map_location="cpu"))
     model.eval()
 
     lbl = ["raw radar"] + [f"KF q = {q:g}" for q in Q_VAL] + ["GRU"]
