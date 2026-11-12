@@ -60,6 +60,8 @@
 
   .controls { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; margin-top: 12px; }
   .controls input[type=range] { flex: 1 1 200px; min-width: 120px; }
+  .viewbar { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin: 0 0 12px; }
+  .viewbar .hint { color: var(--muted); font-size: 0.85rem; }
   .legend { display: flex; flex-wrap: wrap; gap: 8px 16px; margin: 4px 0 12px; }
   .legend label { display: inline-flex; align-items: center; gap: 6px; cursor: pointer; font-size: 0.92rem; }
   .sw { width: 12px; height: 12px; border-radius: 3px; display: inline-block; }
@@ -109,6 +111,12 @@
     <p class="sub" id="blurb"></p>
     <div class="tabs" role="tablist" aria-label="Scenario" id="tabs"></div>
 
+    <div class="viewbar" role="group" aria-label="Display mode">
+      <button id="v-ppi" type="button" aria-pressed="true">Radar view</button>
+      <button id="v-close" type="button" aria-pressed="false">Close-up</button>
+      <button id="zoom" type="button" aria-pressed="false">Zoom to target</button>
+      <span class="hint" id="viewhint"></span>
+    </div>
     <div class="legend" id="legend"></div>
 
     <div class="stage">
@@ -146,15 +154,27 @@
   const $ = (id) => document.getElementById(id);
   const css = (name) => getComputedStyle(document.documentElement).getPropertyValue(name).trim();
   const reduceMotion = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
-  const SCANS_PER_SEC = 6;
+  const SCANS_PER_SEC = 6;       // close-up replay speed
+  const PPI_SCANS_PER_SEC = 3;   // radar view: the sweep makes this many turns per second
   const BAR_CAP = 700;
   const NICE = { straight: "Straight", turning: "Turning", maneuvers: "Maneuvers", noisy: "Noisy radar", missed_30: "30% missed scans" };
 
-  const state = { scn: 0, trk: 0, q: D.qs[1], t: 0, playing: !reduceMotion,
+  const state = { scn: 0, trk: 0, q: D.qs[1], t: 0, playing: !reduceMotion, view: "ppi", zoom: false,
                   show: { truth: true, plots: true, kf: true, gru: true } };
   let prepared = null, view = null, last = 0;
 
   const dist = (a, b) => Math.hypot(a[0] - b[0], a[1] - b[1]);
+  const PPI = { truth: "#e8ecf2", plots: "#fb923c", kf: "#5aa2ff", gru: "#34d399", grn: "60,255,130" };
+
+  // Index of the latest scan the sweep has revealed. In the radar view a plot appears when
+  // the beam crosses the target's bearing (t = scan + bearing/360). In close-up it is just floor(t).
+  function curT() {
+    if (state.view !== "ppi") return Math.floor(state.t);
+    let idx = -1;
+    for (let k = 0; k < prepared.T; k++) { if (k + prepared.frac[k] <= state.t) idx = k; else break; }
+    return idx;
+  }
+  const atEnd = () => state.t >= (state.view === "ppi" ? prepared.T - 0.01 : prepared.T - 1);
 
   // ---- per-track precompute: errors for each method, forward-filled raw radar ----
   function prepare(track) {
@@ -169,7 +189,12 @@
     const kfErr = {};
     for (const q of D.qs) kfErr[q] = track.kf[q].map((p, k) => dist(p, track.truth[k]));
     const gruErr = track.gru.map((p, k) => dist(p, track.truth[k]));
-    return { T, track, rawErr, kfErr, gruErr };
+    // compass bearing of the target as a fraction of a full turn (0 = north, clockwise)
+    const frac = track.truth.map((p) => { let a = Math.atan2(p[0], p[1]); if (a < 0) a += 2 * Math.PI; return a / (2 * Math.PI); });
+    let far = 0;
+    for (const arr of [track.truth, track.meas, track.gru]) for (const p of arr) if (p) far = Math.max(far, Math.hypot(p[0], p[1]));
+    const R = Math.ceil((far * 1.05) / 10000) * 10000;   // display range, rounded up to 10 km
+    return { T, track, rawErr, kfErr, gruErr, frac, R };
   }
 
   function runningRmse(errs, upto) {
@@ -213,7 +238,97 @@
     ctx.fillStyle = color; ctx.beginPath(); ctx.arc(V.X(p), V.Y(p), r, 0, 7); ctx.fill();
   }
 
-  function drawMain() {
+  function drawMain() { state.view === "ppi" ? drawPPI() : drawClose(); }
+
+  function scaleBar(ctx, V, w, h, color) {
+    const target = w * 0.22 / V.s, steps = [100, 200, 500, 1000, 2000, 5000, 10000, 20000];
+    const len = steps.filter((m) => m <= target).pop() || 100, px = len * V.s;
+    ctx.strokeStyle = color; ctx.fillStyle = color; ctx.lineWidth = 2;
+    ctx.beginPath(); ctx.moveTo(w - 16 - px, h - 18); ctx.lineTo(w - 16, h - 18); ctx.stroke();
+    ctx.font = "12px system-ui, sans-serif"; ctx.textAlign = "right"; ctx.textBaseline = "alphabetic";
+    ctx.fillText(len >= 1000 ? `${len / 1000} km` : `${len} m`, w - 16, h - 24);
+  }
+
+  // Traditional radar display (PPI): radar at the centre, range rings, bearing spokes, rotating sweep.
+  function drawPPI() {
+    const { ctx, w, h } = fit($("main"));
+    const P = prepared, tr = P.track, idx = curT(), R = P.R, G = PPI.grn;
+    ctx.setLineDash([]); ctx.globalAlpha = 1; ctx.shadowBlur = 0;
+    ctx.fillStyle = "#04120a"; ctx.fillRect(0, 0, w, h);
+
+    let ox, oy, s;
+    if (!state.zoom) { s = (Math.min(w, h) / 2 - 30) / R; ox = w / 2; oy = h / 2; }
+    else { const C = computeView(w, h); s = C.s; ox = C.X([0, 0]); oy = C.Y([0, 0]); }
+    const V = { X: (p) => ox + p[0] * s, Y: (p) => oy - p[1] * s, s, w, h };
+    const rpx = R * s, reach = state.zoom ? Math.hypot(w, h) * 3 : rpx;
+
+    ctx.save();
+    if (!state.zoom) { ctx.beginPath(); ctx.arc(ox, oy, rpx, 0, 7); ctx.clip(); }
+
+    ctx.lineWidth = 1; ctx.strokeStyle = `rgba(${G},0.22)`;
+    for (let i = 1; i <= 4; i++) { ctx.beginPath(); ctx.arc(ox, oy, (rpx * i) / 4, 0, 7); ctx.stroke(); }
+    for (let a = 0; a < 360; a += 30) {
+      const r = (a * Math.PI) / 180;
+      ctx.beginPath(); ctx.moveTo(ox, oy); ctx.lineTo(ox + Math.sin(r) * reach, oy - Math.cos(r) * reach); ctx.stroke();
+    }
+
+    // sweep: one revolution per scan; bright line plus a fading wedge behind it
+    const th = (state.t % 1) * 2 * Math.PI, phi = th - Math.PI / 2, N = 28, span = state.zoom ? 0.3 : 0.9;
+    for (let i = 0; i < N; i++) {
+      ctx.fillStyle = `rgba(${G},${0.3 * Math.pow(1 - i / N, 2)})`;
+      ctx.beginPath(); ctx.moveTo(ox, oy); ctx.arc(ox, oy, reach, phi - (span * (i + 1)) / N, phi - (span * i) / N); ctx.closePath(); ctx.fill();
+    }
+    ctx.strokeStyle = `rgba(${G},0.95)`; ctx.lineWidth = 2;
+    ctx.beginPath(); ctx.moveTo(ox, oy); ctx.lineTo(ox + Math.sin(th) * reach, oy - Math.cos(th) * reach); ctx.stroke();
+
+    if (idx >= 0) {
+      ctx.lineJoin = "round"; ctx.lineCap = "round";
+      if (state.show.truth) {
+        ctx.strokeStyle = PPI.truth; ctx.lineWidth = 1; ctx.globalAlpha = 0.25; ctx.setLineDash([4, 5]);
+        path(ctx, tr.truth, tr.truth.length - 1, V);
+        ctx.setLineDash([]); ctx.globalAlpha = 0.9; ctx.lineWidth = 1.6; path(ctx, tr.truth, idx, V); ctx.globalAlpha = 1;
+      }
+      if (state.show.kf) { ctx.strokeStyle = PPI.kf; ctx.lineWidth = 2.2; path(ctx, tr.kf[state.q], idx, V); }
+      if (state.show.gru) { ctx.strokeStyle = PPI.gru; ctx.lineWidth = 2.2; path(ctx, tr.gru, idx, V); }
+
+      if (state.show.plots) {            // phosphor blips: bright when painted, then fade
+        for (let k = 0; k <= idx; k++) if (tr.meas[k]) {
+          const age = state.t - (k + P.frac[k]), fresh = age < 0.8;
+          ctx.globalAlpha = Math.max(0.2, 1 - age / 3);
+          if (fresh) { ctx.shadowColor = PPI.plots; ctx.shadowBlur = 12; }
+          dot(ctx, tr.meas[k], V, fresh ? 4 : 2.6, PPI.plots);
+          ctx.shadowBlur = 0;
+        }
+        ctx.globalAlpha = 1;
+      }
+      if (state.show.kf) dot(ctx, tr.kf[state.q][idx], V, 5, PPI.kf);
+      if (state.show.gru) dot(ctx, tr.gru[idx], V, 5, PPI.gru);
+      if (state.show.truth) dot(ctx, tr.truth[idx], V, 3.5, PPI.truth);
+    }
+    ctx.restore();
+
+    dot(ctx, [0, 0], V, 3.5, "#a78bfa");   // the radar itself
+    ctx.font = "11px ui-monospace, Consolas, monospace"; ctx.fillStyle = `rgba(${G},0.75)`; ctx.textAlign = "center"; ctx.textBaseline = "middle";
+    if (!state.zoom) {
+      ctx.strokeStyle = `rgba(${G},0.55)`; ctx.lineWidth = 2; ctx.beginPath(); ctx.arc(ox, oy, rpx, 0, 7); ctx.stroke();
+      for (let a = 0; a < 360; a += 30) {
+        const r = (a * Math.PI) / 180;
+        ctx.fillText(String(a).padStart(3, "0"), ox + Math.sin(r) * (rpx + 15), oy - Math.cos(r) * (rpx + 15));
+      }
+      ctx.textAlign = "left";
+      for (let i = 1; i <= 4; i++) ctx.fillText(`${(R * i) / 4000} km`, ox + 6, oy - (rpx * i) / 4 + 11);
+    } else {
+      scaleBar(ctx, V, w, h, `rgba(${G},0.8)`);
+      ctx.textAlign = "right"; ctx.fillText(`rings every ${R / 4000} km`, w - 16, 20);
+    }
+
+    const b = $("badge");
+    const miss = idx >= 0 && !tr.meas[idx];
+    b.textContent = idx < 0 ? "Scanning…" : miss ? "No radar return this scan" : "Radar return received";
+    b.classList.toggle("miss", miss);
+  }
+
+  function drawClose() {
     const { ctx, w, h } = fit($("main"));
     ctx.clearRect(0, 0, w, h);
     const V = view = computeView(w, h);
@@ -242,13 +357,7 @@
     }
     if (state.show.truth) dot(ctx, tr.truth[T], V, 4, css("--truth"));
 
-    // scale bar
-    const target = w * 0.22 / V.s, steps = [100, 200, 500, 1000, 2000, 5000, 10000, 20000];
-    const len = steps.filter((m) => m <= target).pop() || 100, px = len * V.s;
-    ctx.strokeStyle = css("--muted"); ctx.fillStyle = css("--muted"); ctx.lineWidth = 2;
-    ctx.beginPath(); ctx.moveTo(w - 16 - px, h - 18); ctx.lineTo(w - 16, h - 18); ctx.stroke();
-    ctx.font = "12px system-ui, sans-serif"; ctx.textAlign = "right";
-    ctx.fillText(len >= 1000 ? `${len / 1000} km` : `${len} m`, w - 16, h - 24);
+    scaleBar(ctx, V, w, h, css("--muted"));
 
     const miss = !tr.meas[T];
     const b = $("badge");
@@ -259,7 +368,7 @@
   function drawErr() {
     const { ctx, w, h } = fit($("err"));
     ctx.clearRect(0, 0, w, h);
-    const P = prepared, T = Math.floor(state.t);
+    const P = prepared, T = Math.max(curT(), 0);
     const series = [[P.rawErr, css("--raw"), 1.4, true], [P.kfErr[state.q], css("--kf"), 2, state.show.kf],
                     [P.gruErr, css("--gru"), 2, state.show.gru]];
     let max = 50;
@@ -286,7 +395,7 @@
   }
 
   function updateCards() {
-    const P = prepared, T = Math.floor(state.t);
+    const P = prepared, T = Math.max(curT(), 0);
     const items = [["Raw radar", "--raw", P.rawErr], [`Kalman filter (q=${state.q})`, "--kf", P.kfErr[state.q]], ["GRU", "--gru", P.gruErr]];
     $("cards").innerHTML = items.map(([name, col, e]) => {
       const r = runningRmse(e, T);
@@ -369,18 +478,36 @@
   function frame(now) {
     const dt = Math.min((now - last) / 1000, 0.1); last = now;
     if (state.playing) {
-      state.t += dt * SCANS_PER_SEC;
-      if (state.t >= prepared.T - 1) { state.t = prepared.T - 1; state.playing = false; $("play").textContent = "Replay"; }
+      const ppi = state.view === "ppi", end = ppi ? prepared.T : prepared.T - 1;
+      state.t += dt * (ppi ? PPI_SCANS_PER_SEC : SCANS_PER_SEC);
+      if (state.t >= end) { state.t = ppi ? end - 1e-6 : end; state.playing = false; $("play").textContent = "Replay"; }
       draw();
     }
     requestAnimationFrame(frame);
   }
 
   $("play").addEventListener("click", () => {
-    if (state.t >= prepared.T - 1) state.t = 0;
+    if (atEnd()) state.t = 0;
     state.playing = !state.playing; $("play").textContent = state.playing ? "Pause" : "Play"; draw();
   });
-  $("scrub").addEventListener("input", (e) => { state.playing = false; $("play").textContent = "Play"; state.t = +e.target.value; draw(); });
+  $("scrub").addEventListener("input", (e) => { state.playing = false; $("play").textContent = "Play"; state.t = +e.target.value + (state.view === "ppi" ? 0.999 : 0); draw(); });
+
+  function setView(v) {
+    const k = Math.max(curT(), 0);
+    state.view = v; state.t = v === "ppi" ? k + 0.999 : k;
+    $("v-ppi").setAttribute("aria-pressed", v === "ppi");
+    $("v-close").setAttribute("aria-pressed", v === "close");
+    $("zoom").hidden = v !== "ppi";
+    $("viewhint").textContent = v === "ppi"
+      ? "The sweep makes one turn per scan. A plot appears as the beam crosses the target."
+      : "Top-down view zoomed to the track, so the noise is easy to see.";
+    draw();
+  }
+  $("v-ppi").addEventListener("click", () => setView("ppi"));
+  $("v-close").addEventListener("click", () => setView("close"));
+  $("zoom").addEventListener("click", () => {
+    state.zoom = !state.zoom; $("zoom").setAttribute("aria-pressed", state.zoom); draw();
+  });
   $("next").addEventListener("click", () => { state.trk = (state.trk + 1) % D.scenarios[state.scn].tracks.length; load(); });
   $("theme").addEventListener("click", () => {
     const dark = matchMedia("(prefers-color-scheme: dark)").matches;
@@ -390,7 +517,7 @@
   window.addEventListener("resize", draw);
   matchMedia("(prefers-color-scheme: dark)").addEventListener("change", draw);
 
-  buildTabs(); buildLegend(); buildBars(); selectScenario(0);
+  buildTabs(); buildLegend(); buildBars(); selectScenario(0); setView("ppi");
   requestAnimationFrame((t) => { last = t; frame(t); });
 })();
 </script>
