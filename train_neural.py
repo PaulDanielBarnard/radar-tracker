@@ -77,6 +77,8 @@ def main():
     ap.add_argument("--lr", type = float, default = 1e-3)
     ap.add_argument("--hidden", type = int, default = 64, help = "GRU memory size")
     ap.add_argument("--layers", type = int, default = 1, help = "stacked GRU layers")
+    ap.add_argument("--wd", type = float, default = 1e-4, help = "weight decay (a small penalty on big weights)")
+    ap.add_argument("--patience", type = int, default = 8, help = "stop after this many epochs without improvement (0 = never)")
     ap.add_argument("--hybrid", action = "store_true", help = "start from a Kalman filter and learn a correction")
     ap.add_argument("--randomize", action = "store_true", help = "train on random radar settings")
     ap.add_argument("--name", default = "gru_tracker", help = "checkpoint name in outputs/")
@@ -100,8 +102,10 @@ def main():
 
     model = GRUTracker(n_feat = n_features(args.hybrid), hidden = args.hidden,
                        layers = args.layers, hybrid = args.hybrid)
-    opt = torch.optim.Adam(model.parameters(), lr = args.lr)
-    best = float("inf")
+    opt = torch.optim.AdamW(model.parameters(), lr = args.lr, weight_decay = args.wd)
+    # halve the learning rate whenever validation stops improving for a few epochs
+    sched = torch.optim.lr_scheduler.ReduceLROnPlateau(opt, mode = "min", factor = 0.5, patience = 3)
+    best, stale = float("inf"), 0
 
     for epoch in range(1, args.epochs + 1):
         model.train()
@@ -125,14 +129,21 @@ def main():
             val_loss = settled_loss(val_pred, val_truth, val_scale).item()   # picks the best epoch
             val_rmse = rmse_m(val_pred, val_truth)                           # metres, for humans
 
+        sched.step(val_loss)
         marker = ""
         if val_loss < best:
-            best = val_loss
+            best, stale = val_loss, 0
             save_model(model, ckpt)
             marker = " <- saved"
+        else:
+            stale += 1
 
         print(f"epoch {epoch:3d}  train loss {train_loss:6.3f}   val loss {val_loss:6.3f}"
-              f"   val RMSE {val_rmse:7.1f} m{marker}")
+              f"   val RMSE {val_rmse:7.1f} m"
+              f"   lr {opt.param_groups[0]['lr']:.0e}{marker}")
+        if args.patience and stale >= args.patience:
+            print(f"No improvement for {args.patience} epochs, stopping early.")
+            break
 
     model = load_model(ckpt)   # reload the best epoch
     report_by_scenario(model, val_sets)
