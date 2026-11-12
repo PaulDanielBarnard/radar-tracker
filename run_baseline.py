@@ -4,7 +4,6 @@
     python run_baseline.py --tracks 1000
 """
 import argparse
-from pathlib import Path
 
 import matplotlib
 matplotlib.use("Agg")
@@ -12,30 +11,11 @@ import matplotlib.pyplot as plt
 import numpy as np
 
 from tracker.kalman import ConstantVelocityKF
-from tracker.metrics import position_error, rmse_over_tracks
+from tracker.metrics import evaluate, raw_measurement_error, rmse_over_tracks
+from tracker.paths import OUT_DIR as OUT
 from tracker.scenarios import BASE_RADAR, Q_VAL, SCENARIOS, TARGET
 from tracker.simulate import simulate_batch
-OUT = Path("outputs")
 
-
-
-def evaluate(tracks, kf):
-    errors = np.stack([position_error(kf.run(t), t.truth) for t in tracks])
-    return errors
-
-
-def raw_measurement_error(tracks):
-    """Baseline-of-baselines: just use the latest radar plot, no filtering."""
-    out = []
-    for t in tracks:
-        last = t.meas_xy[0].copy()
-        est = np.zeros((len(t.detected), 2))
-        for k in range(len(t.detected)):
-            if t.detected[k]:
-                last = t.meas_xy[k]
-            est[k] = last
-        out.append(np.linalg.norm(est - t.truth[:, :2], axis=1))
-    return np.stack(out)
 
 
 def main():
