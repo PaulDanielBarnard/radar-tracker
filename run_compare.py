@@ -4,22 +4,17 @@ import argparse
 import numpy as np
 import torch
 
-from tracker.dataset import tracks_to_tensors
 from tracker.kalman import ConstantVelocityKF
 from tracker.metrics import evaluate, raw_measurement_error, rmse_over_tracks
-from tracker.neural import GRUTracker
+from tracker.neural import GRUTracker, gru_estimates
 from tracker.paths import CHECKPOINT
 from tracker.scenarios import Q_VAL, SCENARIOS, TARGET
 from tracker.simulate import simulate_batch
 
-def gru_errors( model, tracks):
+def gru_errors(model, tracks):
+    truth = np.stack([t.truth[:, :2] for t in tracks])
+    return np.linalg.norm(gru_estimates(model, tracks) - truth, axis=2)  # (n_tracks, T)
 
-    feats, base, truth = tracks_to_tensors(tracks)
-
-    with torch.no_grad():
-        pred = model(feats, base)
-
-    return torch.linalg.norm(pred - truth, dim = 2).numpy() #(n_tracks, T)
 
 def main():
 

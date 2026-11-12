@@ -1,6 +1,7 @@
 """GRU Tracker that learns a correction to the latest Radar plot"""
+import torch
 from torch import nn
-from .dataset import OUT_SCALE
+from .dataset import OUT_SCALE, tracks_to_tensors
 
 class GRUTracker(nn.Module):
 
@@ -15,4 +16,11 @@ class GRUTracker(nn.Module):
         """feats: (batch, T, 5), base: (batch, T, 2) in m -> (batch, T, 2) m"""
         h, _ = self.gru(feats)  # h : (batch, T, hidden), 1 memory per scan
         return base + self.head(h) * OUT_SCALE  #Latest Plot + Learned Correction
-    
+
+
+def gru_estimates(model, tracks):
+    """Run a trained model over tracks; returns (n_tracks, T, 2) positions in metres."""
+    feats, base, _ = tracks_to_tensors(tracks)
+    model.eval()
+    with torch.no_grad():
+        return model(feats, base).numpy()
