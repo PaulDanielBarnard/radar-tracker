@@ -17,7 +17,13 @@ plots, scenario by scenario)
 3. [Concepts for beginners](#3-concepts-for-beginners)
 4. [Project map](#4-project-map)
 5. [The five scenarios](#5-the-five-scenarios)
-6. [Status](#6-status)
+6. [Evaluating fairly](#6-evaluating-fairly)
+7. [Results](#7-results)
+8. [Lessons learned](#8-lessons-learned)
+9. [Glossary](#9-glossary)
+10. [Exam self-check](#10-exam-self-check)
+11. [Roadmap and further reading](#11-roadmap-and-further-reading)
+12. [Status](#12-status)
 
 ---
 
@@ -27,6 +33,8 @@ plots, scenario by scenario)
   on the one before it, and every concept is tied to the file that implements it.
 - **Just want to run it?** Jump to section 2.
 - **Want to find a file?** Section 4 lists every file with one line on what it does.
+- **Studying for an exam?** Read sections 3, 6 and 7, look up unfamiliar words in the
+  glossary (section 9), then test yourself with the questions in section 10.
 
 ## 2. Quick start
 
@@ -293,9 +301,382 @@ Every script tests on the same five scenarios (`tracker/scenarios.py`):
 
 Speed is kept between 80 and 400 m/s.
 
-## 6. Status
+## 6. Evaluating fairly
+
+### 6.1 Why one test set is not enough
+
+Every track is random, so any single table of results carries luck. A gap of a few metres
+between two trackers might be real, or might just be this batch of tracks. To tell the
+difference you need many independent test batches and a way to measure the doubt.
+(`run_eval.py` does this.)
+
+### 6.2 Many seeds and confidence intervals
+
+One **seed** gives one fresh batch of test tracks (`run_eval.py` uses seeds 10,000, 10,001, ...
+with 200 tracks each). Score every method on every batch to get one RMSE per method per seed,
+then summarise those numbers as a mean with a **95% confidence interval**:
+
+```
+mean +/- t * s / sqrt(n)
+
+  n = number of seeds       s = standard deviation of the n RMSEs (divide by n-1)
+  t = 2.26 for n = 10       (it is 12.7 for n = 2: with few seeds the interval is very wide)
+```
+
+Read it as: if you repeated the whole experiment many times, about 95% of intervals built
+this way would contain the true average. A narrow interval means the number is trustworthy.
+Implemented in `mean_ci` (`tracker/stats.py`).
+
+### 6.3 Paired comparison
+
+Within one seed, every method sees **exactly the same tracks**. So instead of comparing two
+separate intervals, compute the difference per seed (GRU minus best Kalman) and put an
+interval around the average difference (`paired_diff_ci`).
+
+- If the interval **excludes 0**, one method is clearly better.
+- If it **includes 0**, the data cannot separate them ("no clear difference").
+
+Pairing is more sensitive because hard tracks are hard for everyone. That shared difficulty
+cancels in the difference. For the maneuvers scenario the paired interval is +/-0.8 m,
+less than half the width of either method's own interval (+/-1.9 and +/-1.8 m).
+
+### 6.4 Is the filter honest about its own uncertainty?
+
+A Kalman filter reports its own uncertainty `P`. We can check whether that claim is true.
+
+```
+NEES = (truth - estimate)^T  P^-1  (truth - estimate)     uses the true state (all 4 values)
+NIS  = y^T  S^-1  y                                        uses only the innovation y, so it
+                                                           needs no ground truth
+```
+
+NEES (normalized estimation error squared) divides the real error by the filter's claimed
+error. If the filter is honest, NEES averages **4** (the state has 4 numbers) and NIS
+averages **2** (a plot has 2 numbers). For an average over `n` independent tracks, the
+95% band comes from the chi-squared distribution (`chi2_bounds` in `tracker/stats.py`);
+for 200 tracks it is **3.62 to 4.40**.
+
+| Reading | Meaning | Typical cause | Fix |
+|---|---|---|---|
+| **above** the ideal | **overconfident**: errors are larger than the filter believes | `q` too small, so it trusts its prediction and lags | raise `q`, or model maneuvers |
+| **below** the ideal | **too cautious**: errors are smaller than the filter believes | `q` too large, so it throws accuracy away | lower `q` |
+| close to the ideal | **consistent** | `q` suits the motion | none needed |
+
+Caveats: consecutive scans are not independent, so the exact band is only a guide. The
+tables below call a value "consistent" if it is within 15% of the ideal.
+NIS has a practical advantage: it can be computed on real data, where the truth is unknown.
+
+## 7. Results
+
+All GRU numbers are for the recommended model, trained with
+`python train_neural.py --hybrid --randomize --hidden 128 --layers 2 --epochs 50`.
+
+### 7.1 Position error over 10 seeds (`python run_eval.py`)
+
+Position RMSE in metres, mean +/- 95% interval over 10 seeds of 200 tracks each. Lower is
+better; the best mean in each row is bold.
+
+| scenario | raw radar | KF q=0.1 | KF q=1 | KF q=10 | KF q=100 | GRU |
+|---|---|---|---|---|---|---|
+| straight | 205.6 ± 2.0 | **57.6 ± 0.8** | 63.3 ± 0.7 | 76.1 ± 0.7 | 96.0 ± 0.7 | 81.7 ± 0.7 |
+| turning | 192.7 ± 2.6 | 2081.3 ± 46.4 | 920.0 ± 20.9 | 327.8 ± 7.6 | 134.6 ± 2.4 | **104.9 ± 1.6** |
+| maneuvers | 202.1 ± 3.5 | 1039.7 ± 43.7 | 505.1 ± 18.0 | 216.9 ± 5.2 | 118.7 ± 1.8 | **113.6 ± 1.9** |
+| noisy | 606.3 ± 10.5 | 1687.3 ± 74.2 | 1021.6 ± 41.9 | 516.2 ± 16.6 | 297.8 ± 4.7 | **286.2 ± 4.3** |
+| missed_30 | 296.7 ± 4.2 | 1153.2 ± 46.9 | 585.7 ± 21.0 | 262.1 ± 6.0 | 146.4 ± 1.9 | **141.6 ± 2.0** |
+
+Paired difference, GRU minus the best Kalman setting (negative means the GRU has less error):
+
+| scenario | best Kalman | GRU minus Kalman (m) | verdict |
+|---|---|---|---|
+| straight | q=0.1 | +24.2 ± 0.7 | Kalman better |
+| turning | q=100 | -29.7 ± 1.3 | GRU better |
+| maneuvers | q=100 | -5.1 ± 0.8 | GRU better |
+| noisy | q=100 | -11.6 ± 3.3 | GRU better |
+| missed_30 | q=100 | -4.8 ± 1.2 | GRU better |
+
+What to take from it:
+- **The GRU wins four of five scenarios, the Kalman filter wins straight flight.** On straight
+  flight a very steady filter (q=0.1) averages the noise away almost perfectly (57.6 m); the
+  GRU cannot match that (81.7 m).
+- **The turning scenario shows the q tradeoff at its most extreme.** The q=0.1 filter is
+  off by about 2 km (it keeps flying straight while the target turns); q=100 gets 134.6 m.
+  The GRU, which can adapt, reaches 104.9 m.
+- **Everything beats raw radar**, except the badly tuned filters in turns and noise.
+- **The small wins are real.** On maneuvers (-5.1 m) and missed scans (-4.8 m) the intervals
+  exclude zero, so the GRU's edge is not luck.
+
+### 7.2 Is each Kalman filter honest? (one batch of 200 tracks per scenario)
+
+Mean **NEES** after the 10-scan burn-in (ideal 4; 95% band for a single scan 3.62 to 4.40):
+
+| scenario | q=0.1 | q=1 | q=10 | q=100 | reading |
+|---|---|---|---|---|---|
+| straight | 2.5 | 2.2 | 2.1 | 2.1 | every q is **too cautious** |
+| turning | 14,098 | 1,088 | 65.9 | 5.5 | every q is **overconfident**; q=100 only slightly |
+| maneuvers | 3,652 | 357 | 29.5 | 3.8 | only q=100 is **consistent** |
+| noisy | 2,938 | 370 | 37.6 | 4.8 | q=100 slightly overconfident (20% above ideal) |
+| missed_30 | 3,609 | 368 | 31.5 | 4.0 | only q=100 is **consistent** |
+
+Mean **NIS** (ideal 2):
+
+| scenario | q=0.1 | q=1 | q=10 | q=100 |
+|---|---|---|---|---|
+| straight | 1.96 | 1.92 | 1.86 | 1.74 |
+| turning | 368.0 | 62.4 | 9.28 | 2.56 |
+| maneuvers | 83.3 | 18.8 | 4.54 | 2.10 |
+| noisy | 31.1 | 10.4 | 3.67 | 2.14 |
+| missed_30 | 102.6 | 23.7 | 5.40 | 2.16 |
+
+What to take from it:
+- **q=100 is nearly honest in every scenario with maneuvers.** Its claimed uncertainty matches
+  its real errors, so large `q` is the right model for aircraft that turn.
+- **q=0.1 is wildly overconfident in turns** (NEES about 14,000 against an ideal of 4). It is
+  certain of its path while being 2 km wrong. This is the lag problem, now measured.
+- **On straight flight every q reads below 4.** Even q=0.1 is too cautious, because the
+  simulated target really never accelerates. An even smaller `q` would be the honest one.
+- **No single `q` is honest everywhere.** That is the formal version of "one knob cannot fit
+  all scenarios".
+- **The GRU has no NEES.** It outputs a position, not an uncertainty, so this check cannot be
+  applied to it. That is a real limitation compared with a Kalman filter.
+
+### 7.3 Beyond the training range
+
+During development a plain GRU (no Kalman inputs) was tested on a very noisy radar, far
+beyond anything it trained on (300 m range noise, 0.03 rad bearing noise). Both the
+fixed-scenario and the randomised plain GRU did badly there (about 670 m), losing to a
+Kalman filter with q=100 (about 523 m). The **hybrid** GRU, which starts from a Kalman
+estimate, got 503.9 m. (That experiment used a throwaway script that is not part of the
+repository.) Lesson: a learned tracker is only as good as the conditions it has seen, and
+building a physical model into it helps it fail more gracefully.
+
+### 7.4 Why two seeds were not enough
+
+Running `run_eval.py` with only 2 seeds gave "no clear difference" for maneuvers (-4.0 +/- 15.3 m),
+noisy and missed scans. The averages were nearly the same as with 10 seeds, but with two
+data points the interval is enormous (t = 12.7). The same small gap became clearly real
+once there were ten seeds (-5.1 +/- 0.8 m). More data does not change the answer, it
+lets you be **sure** of it.
+
+## 8. Lessons learned
+
+- **A units bug hid in plain sight.** The training loss averaged the squared error over the
+  x and y axes instead of adding them into a distance, so every RMSE printed during training
+  was 1/sqrt(2) (about 0.71 times) too small, and did not match the evaluation tables. Training
+  itself was unaffected (an identical rerun gave identical results), but the printed numbers
+  misled. Lesson: when two numbers that should agree don't, find out why.
+- **Read train versus validation loss.** When training and validation error were almost the
+  same, the model was not memorising (overfitting); it was limited by capacity and training
+  (underfitting). If validation error had risen while training error fell, that would have
+  been overfitting.
+- **More epochs did not help.** A run allowed 150 epochs stopped itself at epoch 64 and gave
+  results identical to the 50-epoch model, because the best epoch had already been reached.
+  What looked like "still improving" was a plateau.
+- **Richer input features barely helped** (about 1 m) at the default model size. The network
+  was not short of information. A bigger model (hidden 128, two layers) helped most: for
+  example turning dropped from 112.6 m to 99.4 m.
+- **The noise-balanced loss helped modestly** (turning 119.2 to 112.6 m, missed scans
+  167.8 to 154.5 m), by stopping noisy tracks from drowning out quiet ones.
+- **Randomising the radar during training helped on unseen conditions** (50% missed scans:
+  212.3 to 195.1 m), though not on the five fixed scenarios it was never specifically shown.
+- **A negative result is still a result.** "Training longer does not help" saved time and
+  pointed at the real limits.
+- **Pairing, many seeds and consistency checks changed what we could claim.** The small wins
+  only became believable with them.
+
+## 9. Glossary
+
+| Term | Meaning |
+|---|---|
+| plot | one radar measurement of the target (range and bearing) |
+| scan | one sweep of the radar; here one per second, so one possible plot per second |
+| track | one simulated flight: 120 scans of truth and measurements |
+| state | the tracker's belief about the target: `[x, y, vx, vy]` |
+| covariance (`P`) | a matrix describing how uncertain the state is; its diagonal holds the variances |
+| innovation (`y`) | the plot minus the prediction: how surprised the filter is |
+| gain (`K`) | how far to move the estimate toward the plot; large when the prediction is uncertain |
+| process noise (`q`, `Q`) | how much unplanned acceleration the filter allows for; the one tuning knob |
+| burn-in | the first scans of a track, ignored in scoring while trackers settle (10 scans) |
+| RMSE | root mean square error: square the errors, average, take the root; lower is better |
+| recurrent network | a network that reads a sequence one step at a time and keeps a memory |
+| GRU | Gated Recurrent Unit: a recurrent network whose gates decide what to remember or forget |
+| residual learning | learning a correction to a base estimate instead of the estimate itself |
+| hybrid | the GRU starts from a Kalman estimate and sees Kalman outputs as inputs (`--hybrid`) |
+| causal | using only past and present data, never the future |
+| validation | scoring on held-out tracks the model never trains on, to choose the best epoch |
+| overfitting | learning the training data's quirks; training error low, validation error high |
+| underfitting | not learning enough; both training and validation error stay high |
+| early stopping | ending training once validation stops improving |
+| seed | the number that fixes a random generator, so the same tracks can be recreated |
+| confidence interval | a range around an average that expresses how sure we are of it |
+| paired comparison | comparing methods on the same tracks, using the per-track or per-seed differences |
+| NEES | normalized estimation error squared: real error measured against the filter's claim; ideal = 4 |
+| NIS | normalized innovation squared: the same idea using only the innovation; ideal = 2 |
+| chi-squared | the distribution that the squared errors of an honest filter follow; gives the bands |
+| consistent | the filter's claimed uncertainty matches its real errors |
+| overconfident | real errors are larger than the filter claims (NEES above the ideal) |
+| too cautious | real errors are smaller than the filter claims (NEES below the ideal) |
+
+## 10. Exam self-check
+
+Try each question before opening the answer.
+
+<details><summary><b>1.</b> What problem does a tracker solve?</summary>
+
+It estimates the hidden true state of a target (position and velocity) from measurements that
+are noisy and sometimes missing.
+</details>
+
+<details><summary><b>2.</b> The radar only measures position. Why does the state also contain velocity?</summary>
+
+To predict where the target will be next you need its velocity. The filter infers it from how the
+plots move over successive scans.
+</details>
+
+<details><summary><b>3.</b> Describe the two steps of the Kalman filter.</summary>
+
+Predict: move the estimate forward with the motion model and grow the uncertainty (`P = F P F^T + Q`).
+Update: compare the new plot with the prediction (the innovation), and move the estimate toward the
+plot by the gain `K`, which also shrinks the uncertainty.
+</details>
+
+<details><summary><b>4.</b> What does the gain K control, and when is it large?</summary>
+
+It sets how much to trust the plot versus the prediction. K is large when the prediction is uncertain
+(large `P`) or the plot is precise (small `R`), and small in the opposite cases.
+</details>
+
+<details><summary><b>5.</b> Predicted position 1200 m, plot at 1260 m, position gain 0.833. What is the new position?</summary>
+
+1200 + 0.833 x (1260 - 1200) = 1200 + 50 = 1250 m.
+</details>
+
+<details><summary><b>6.</b> What does q control, and why does a small q lag in turns?</summary>
+
+`q` is how much unplanned acceleration the filter expects. With small `q` it believes the target flies
+steadily, so its gain is small and it leans on its straight-line prediction, which keeps flying straight
+while the target turns.
+</details>
+
+<details><summary><b>7.</b> Why can no single q win in every scenario?</summary>
+
+Small `q` averages noise well on straight flight but lags turns; large `q` follows turns but passes plot
+noise through. Straight flight and turns want opposite settings (q=0.1 wins straight, q=100 wins the rest).
+</details>
+
+<details><summary><b>8.</b> What does the filter do when a scan is missed?</summary>
+
+It only predicts (no update), so its uncertainty keeps growing until the next plot arrives. This is called coasting.
+</details>
+
+<details><summary><b>9.</b> Why are the first 10 scans ignored when scoring?</summary>
+
+The filter starts from one plot with zero velocity and large uncertainty, so every tracker is poor until it
+has seen a few scans. Including them would measure start-up, not tracking quality.
+</details>
+
+<details><summary><b>10.</b> What is residual learning, and why does the output layer start at zero?</summary>
+
+The network outputs a correction that is added to a base position instead of the position itself, which
+would need tiny relative accuracy. With a zero-initialised output layer, the untrained model returns the base
+exactly, so training can only improve on it.
+</details>
+
+<details><summary><b>11.</b> What does hybrid mode change?</summary>
+
+The base position becomes a Kalman filter's estimate (q=100), and the network also receives the Kalman
+estimates (q=0.1 and q=100) as inputs. It starts at Kalman quality and learns where to deviate. It also
+degrades more gracefully on conditions outside the training range.
+</details>
+
+<details><summary><b>12.</b> Why is each track's loss divided by its expected radar noise?</summary>
+
+Noisy tracks have far larger errors and would dominate the loss. Dividing by the expected raw error makes
+quiet and noisy tracks count about equally.
+</details>
+
+<details><summary><b>13.</b> Why score on separate validation tracks? What do the loss curves tell you?</summary>
+
+Scoring on training data rewards memorising. If training error falls while validation error rises, the model is
+overfitting. If both stay high and similar, it is underfitting (needs more capacity or better training).
+</details>
+
+<details><summary><b>14.</b> Why must the GRU be causal?</summary>
+
+A Kalman filter only knows the past and present. A network that saw future scans would have extra information,
+so the comparison would be unfair.
+</details>
+
+<details><summary><b>15.</b> Why evaluate over many seeds, and what does a 95% confidence interval mean?</summary>
+
+One batch of random tracks carries luck, so small gaps could be chance. Many seeds measure that doubt. A 95%
+interval means that if the whole experiment were repeated many times, about 95% of such intervals would
+contain the true average.
+</details>
+
+<details><summary><b>16.</b> Why compare methods in a paired way?</summary>
+
+Both methods see the same tracks in each seed, so shared difficulty cancels in the per-seed difference. The
+interval on the difference is narrower, which exposes small real gaps. If it excludes 0, the gap is clear.
+</details>
+
+<details><summary><b>17.</b> What is the ideal NEES here, and what does a NEES of 14,000 mean?</summary>
+
+The ideal is 4, the number of state components. 14,000 is vastly above it: the filter (q=0.1 in the turning
+scenario) is overconfident, claiming far smaller errors than it really has.
+</details>
+
+<details><summary><b>18.</b> NEES is about 2.1 on straight flight. What does that say, and what would you change?</summary>
+
+It is below 4, so the filter is too cautious: its real errors are smaller than it claims. A smaller `q` would
+match the motion better, since the target never accelerates.
+</details>
+
+<details><summary><b>19.</b> Why can NEES not be computed for the GRU?</summary>
+
+NEES needs the filter's own covariance. The GRU outputs only a position, with no uncertainty estimate.
+</details>
+
+<details><summary><b>20.</b> Where does the Kalman filter beat the GRU here, and why?</summary>
+
+On straight flight (57.6 m against 81.7 m). With nothing to adapt to, a very steady filter (q=0.1) averages
+the noise almost perfectly, while the GRU, trained on all kinds of motion, does not smooth that hard.
+</details>
+
+## 11. Roadmap and further reading
+
+**Where the project could go next**
+- **IMM filter (Interacting Multiple Model):** run several Kalman filters at once (steady, agile,
+  turning) and blend them by how well each predicts the next plot. It attacks the "one `q`
+  cannot fit everything" problem directly, and is the fairest classical opponent for the GRU.
+- **Several targets and false alarms:** gating (only consider plots near a prediction), the
+  Hungarian algorithm for assigning plots to tracks, clutter as random false plots, and
+  track management (confirm after M hits in N scans, drop after misses). This is the biggest
+  step up in realism.
+- **A learned gain (KalmanNet style):** keep the Kalman predict-and-update structure but let a
+  small GRU output the gain, so the physics stays fixed and only the gain is learned. It
+  should hold up better outside the training range than a free-form GRU.
+- **Real flight data:** ADS-B tracks (for example from the OpenSky Network) with simulated radar
+  noise added, in place of invented maneuvers.
+- **Notebooks only for exploring:** keep the code in the `tracker/` package and its tests, and use
+  notebooks that import it for plots and experiments.
+
+**Further reading**
+- Kalman filter tutorials: search for "Kalman filter from scratch" or Roger Labbe's free book
+  *Kalman and Bayesian Filters in Python*.
+- Recurrent networks and GRUs: Chris Olah, *Understanding LSTM Networks* (the GRU is a close
+  relative), and the PyTorch `nn.GRU` documentation.
+- Tracking theory: Bar-Shalom, Li and Kirubarajan, *Estimation with Applications to Tracking and
+  Navigation* (covers NEES, NIS, IMM and data association).
+- Statistics: any introduction to confidence intervals and paired t-tests.
+
+## 12. Status
 
 - [x] Step 1: simulator, Kalman baseline, tests
 - [x] Step 2: neural tracker (GRU in PyTorch) trained on simulated tracks
 - [x] Step 3: comparison by scenario (`run_compare.py`, `run_eval.py`)
 - [x] Step 4: browser demo with a traditional radar (PPI) view (`web/`)
+- [x] Rigorous evaluation: many seeds, confidence intervals, paired comparison, NEES and NIS
+- [ ] IMM filter as a stronger classical baseline
+- [ ] Multi-target tracking with clutter
+- [ ] KalmanNet-style learned gain
+- [ ] Real ADS-B flight data
