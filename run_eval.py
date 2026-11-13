@@ -9,16 +9,20 @@ import argparse
 import numpy as np
 
 from tracker.kalman import ConstantVelocityKF
-from tracker.metrics import evaluate, raw_measurement_error, rmse_over_tracks
+from tracker.metrics import BURN_IN, evaluate, raw_measurement_error, rmse_over_tracks
 from tracker.neural import gru_estimates, load_model
 from tracker.paths import checkpoint
 from tracker.scenarios import Q_VAL, SCENARIOS, TARGET
 from tracker.simulate import simulate_batch
-from tracker.stats import mean_ci, paired_diff_ci
+from tracker.stats import chi2_bounds, mean_ci, nees, paired_diff_ci
 
 # Test seeds start high so they never overlap with training (1000+, 2000+)
 # or with the seeds used in earlier experiments (42, 99, 500).
 SEED_BASE = 10_000
+
+# An honest filter has mean NEES equal to the state size (4) and mean NIS equal to the
+# measurement size (2). "Consistent" here means within 15% of those ideals.
+IDEAL_NEES, IDEAL_NIS, TOLERANCE = 4.0, 2.0, 0.15
 
 
 def gru_errors(model, tracks):
@@ -93,8 +97,48 @@ def print_verdicts(all_results):
         print(f"{name:<12}{kf:>13}{f'{diff:+.1f}+/-{half:.1f}':>20}   {verdict(diff, half)}")
 
 
+def consistency_stats(tracks, q):
+    """Mean NEES and mean NIS of one Kalman setting on a batch of tracks.
+
+    Averaged over tracks first, then over time, skipping the first BURN_IN scans.
+    """
+    kf = ConstantVelocityKF(q=q)
+    nees_runs, nis_runs = [], []
+    for t in tracks:
+        est, diag = kf.run(t, return_diag=True)
+        nees_runs.append(nees(t.truth, est, diag["P"]))
+        nis_runs.append(diag["nis"])                      # NaN on missed scans
+    mean_nees = float(np.mean(np.array(nees_runs)[:, BURN_IN:]))
+    mean_nis = float(np.nanmean(np.array(nis_runs)[:, BURN_IN:]))
+    return mean_nees, mean_nis
+
+
+def consistency_label(value, ideal):
+    """Above the ideal = the filter claims more accuracy than it has; below = too cautious."""
+    if abs(value - ideal) <= TOLERANCE * ideal:
+        return "consistent"
+    return "overconfident" if value > ideal else "too cautious"
+
+
+def print_consistency(n_tracks):
+    lo, hi = chi2_bounds(4, n_tracks)
+    print(f"\nFilter consistency on one batch of {n_tracks} tracks per scenario (scans after burn-in)")
+    print(f"ideal mean NEES = {IDEAL_NEES:g} (95% band for a single scan: {lo:.2f} to {hi:.2f}), "
+          f"ideal mean NIS = {IDEAL_NIS:g}; 'consistent' = within {TOLERANCE:.0%} of the ideal\n")
+    header = f"{'scenario':<12}{'q':>7}{'NEES':>12}  {'NEES verdict':<14}{'NIS':>8}  NIS verdict"
+    print(header)
+    print("-" * 66)
+    for name, (mode, radar) in SCENARIOS.items():
+        tracks = simulate_batch(n_tracks, mode, radar, TARGET, seed=SEED_BASE)
+        for q in Q_VAL:
+            mean_nees, mean_nis = consistency_stats(tracks, q)
+            print(f"{name:<12}{q:>7g}{mean_nees:>12.1f}  {consistency_label(mean_nees, IDEAL_NEES):<14}"
+                  f"{mean_nis:>8.2f}  {consistency_label(mean_nis, IDEAL_NIS)}")
+    print("GRU: n/a (it predicts no covariance, so NEES and NIS cannot be computed)")
+
+
 def main():
-    
+
     ap = argparse.ArgumentParser()
     ap.add_argument("--seeds", type=int, default=10, help="independent test batches per scenario")
     ap.add_argument("--tracks", type=int, default=200, help="tracks per batch")
@@ -121,6 +165,7 @@ def main():
     print()
     print_table(all_results, args.seeds, args.tracks)
     print_verdicts(all_results)
+    print_consistency(args.tracks)
 
 
 if __name__ == "__main__":
