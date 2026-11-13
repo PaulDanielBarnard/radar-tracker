@@ -22,12 +22,16 @@ def n_features(hybrid: bool) -> int:
 def kalman_features(track, filled):
     """Run Kalman filters on the track. Returns (extra feature columns, base position)."""
     cols, base = [], None
+
     for q in HYBRID_QS:
+    
         est = ConstantVelocityKF(q=q).run(track)                 # (T, 4): x, y, vx, vy
         cols.append((est[:, :2] - filled) / OUT_SCALE)           # 2: filter vs latest plot
         cols.append(est[:, 2:4] / VEL_SCALE)                     # 2: filter's velocity estimate
+   
         if q == HYBRID_BASE_Q:
             base = est[:, :2]
+   
     return np.concatenate(cols, axis=1), base
 
 
@@ -38,6 +42,7 @@ def track_to_arr(track, hybrid=False):
     step[1:] = filled[1:] - filled[:-1]
 
     since = np.zeros(T)                      # scans since the last real plot (0 = fresh)
+   
     for k in range(1, T):
         since[k] = 0.0 if track.detected[k] else since[k - 1] + 1.0
 
@@ -57,9 +62,11 @@ def track_to_arr(track, hybrid=False):
         noise,                                   # 2: radar noise levels (a Kalman filter is told these too)
     ], axis=1)                                   # shape (T, 11)
     base = filled                                # position the network will correct
+   
     if hybrid:                                   # start from a Kalman filter instead
         extra, base = kalman_features(track, filled)
         feat = np.concatenate([feat, extra], axis=1)
+   
     return feat, base, track.truth[:, :2]
 
 

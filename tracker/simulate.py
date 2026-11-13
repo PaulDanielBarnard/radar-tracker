@@ -46,10 +46,12 @@ def _simulate_truth(rng, cfg: TargetConfig, dt: float, mode: str) -> np.ndarray:
 
     turn_rate, accel = 0.0, 0.0
     steps_left = 0
+
     if mode == "turn":
         turn_rate = rng.choice([-1, 1]) * rng.uniform(0.5, 1.0) * cfg.max_turn_rate
 
     truth = np.zeros((cfg.n_steps, 4))
+
     for k in range(cfg.n_steps):
         truth[k] = [pos[0], pos[1], speed * np.cos(heading), speed * np.sin(heading)]
 
@@ -101,8 +103,12 @@ def forward_fill(track: Track) -> np.ndarray:
     """Latest radar plot at every scan. Missed scans reuse the last real plot."""
     last = track.meas_xy[0].copy()  # scan 0 is always detected
     filled = np.zeros((len(track.detected), 2))
+    
     for k in range(len(track.detected)):
+    
         if track.detected[k]:
             last = track.meas_xy[k]
+    
         filled[k] = last
+    
     return filled

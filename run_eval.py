@@ -22,6 +22,7 @@ SEED_BASE = 10_000
 
 
 def gru_errors(model, tracks):
+
     truth = np.stack([t.truth[:, :2] for t in tracks])
     return np.linalg.norm(gru_estimates(model, tracks) - truth, axis=2)   # (n_tracks, T)
 
@@ -58,6 +59,7 @@ def verdict(diff, half):
 
 
 def print_table(all_results, seeds, n_tracks):
+
     methods = list(next(iter(all_results.values())))
     print(f"Position RMSE in metres, mean +/- 95% CI over {seeds} seeds x {n_tracks} tracks "
           "(lower is better, * = lowest mean)\n")
@@ -65,41 +67,54 @@ def print_table(all_results, seeds, n_tracks):
     print(header)
     print("-" * len(header))
     for name, results in all_results.items():
+
         stats = {m: mean_ci(results[m]) for m in methods}
         best = min(methods, key=lambda m: stats[m][0])
         cells = ""
+
         for m in methods:
+        
             mean, half = stats[m]
             cells += f"{f'{mean:.1f}+/-{half:.1f}' + ('*' if m == best else ' '):>16}"
+        
         print(f"{name:<12}{cells}")
 
 
 def print_verdicts(all_results):
+    
     print("\nGRU vs the best Kalman setting (paired by seed; negative = GRU has less error)\n")
     print(f"{'scenario':<12}{'best Kalman':>13}{'GRU - KF (m)':>20}   verdict")
     print("-" * 66)
+    
     for name, results in all_results.items():
+    
         kf = best_kalman(results)
         diff, half = paired_diff_ci(results["GRU"], results[kf])
         print(f"{name:<12}{kf:>13}{f'{diff:+.1f}+/-{half:.1f}':>20}   {verdict(diff, half)}")
 
 
 def main():
+    
     ap = argparse.ArgumentParser()
     ap.add_argument("--seeds", type=int, default=10, help="independent test batches per scenario")
     ap.add_argument("--tracks", type=int, default=200, help="tracks per batch")
     ap.add_argument("--model", default="gru_tracker", help="checkpoint name in outputs/")
     args = ap.parse_args()
+    
     if args.seeds < 2:
         raise SystemExit("--seeds must be at least 2 (a confidence interval needs a spread).")
 
     ckpt = checkpoint(args.model)
+    
     if not ckpt.exists():
         raise SystemExit(f"No trained model at {ckpt}. Run `python train_neural.py` first.")
+    
     model = load_model(ckpt)
 
     all_results = {}
+    
     for name, (mode, radar) in SCENARIOS.items():
+    
         print(f"running {name} ...", flush=True)
         all_results[name] = run_scenario(mode, radar, args.seeds, args.tracks, model)
 

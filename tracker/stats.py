@@ -12,8 +12,10 @@ def mean_ci(values, level: float = 0.95):
     values = np.asarray(values, dtype=float)
     n = len(values)
     mean = float(values.mean())
+
     if n < 2:
         return mean, float("nan")
+    
     sem = values.std(ddof=1) / np.sqrt(n)                    # standard error of the mean
     return mean, float(stats.t.ppf((1 + level) / 2, n - 1) * sem)
 
