@@ -1,8 +1,4 @@
-"""Run the Kalman baseline across scenarios and show where it struggles.
-
-    python run_baseline.py            # results table + plots in outputs/
-    python run_baseline.py --tracks 1000
-"""
+"""Run the Kalman baseline across scenarios and show where it struggles."""
 import argparse
 
 import matplotlib
