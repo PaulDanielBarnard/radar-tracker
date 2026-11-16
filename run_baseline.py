@@ -1,8 +1,4 @@
-"""Run the Kalman baseline across scenarios and show where it struggles.
-
-    python run_baseline.py            # results table + plots in outputs/
-    python run_baseline.py --tracks 1000
-"""
+"""Run the Kalman baseline across scenarios and show where it struggles."""
 import argparse
 
 import matplotlib
@@ -19,6 +15,7 @@ from tracker.simulate import simulate_batch
 
 
 def main():
+
     ap = argparse.ArgumentParser()
     ap.add_argument("--tracks", type=int, default=500)
     args = ap.parse_args()
@@ -30,16 +27,23 @@ def main():
     print("-" * len(header))
 
     results = {}
+
     for name, (mode, radar) in SCENARIOS.items():
+    
         tracks = simulate_batch(args.tracks, mode, radar, TARGET, seed=42)
         row = {"raw": rmse_over_tracks(raw_measurement_error(tracks))}
+    
         for q in Q_VAL:
+    
             row[q] = rmse_over_tracks(evaluate(tracks, ConstantVelocityKF(q=q)))
+    
         results[name] = row
         print(f"{name:<12}{row['raw']:>11.1f}" + "".join(f"{row[q]:>12.1f}" for q in Q_VAL))
 
     print("\nBest filter setting per scenario:")
+   
     for name, row in results.items():
+   
         best_q = min(Q_VAL, key=lambda q: row[q])
         print(f"  {name:<12} q={best_q:g}  ({row[best_q]:.0f} m)")
     print("A single fixed q is a compromise: small q suits straight flight, large q suits "
@@ -63,9 +67,12 @@ def main():
     names = list(results)
     labels = ["raw radar"] + [f"KF q={q:g}" for q in Q_VAL]
     width = 0.8 / len(labels)
+   
     for i, lab in enumerate(labels):
+   
         key = "raw" if i == 0 else Q_VAL[i - 1]
         ax.bar(np.arange(len(names)) + i * width, [results[n][key] for n in names], width, label=lab)
+   
     ax.set_xticks(np.arange(len(names)) + 0.4 - width / 2); ax.set_xticklabels(names)
     ax.set_ylabel("position RMSE (m)"); ax.set_title("Kalman baseline by scenario")
     ax.legend(); ax.grid(axis="y", alpha=0.3)

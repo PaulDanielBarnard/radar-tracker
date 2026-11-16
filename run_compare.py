@@ -12,6 +12,7 @@ from tracker.scenarios import Q_VAL, SCENARIOS, TARGET
 from tracker.simulate import simulate_batch
 
 def gru_errors(model, tracks):
+
     truth = np.stack([t.truth[:, :2] for t in tracks])
     return np.linalg.norm(gru_estimates(model, tracks) - truth, axis=2)  # (n_tracks, T)
 
@@ -24,8 +25,10 @@ def main():
     args = ap.parse_args()
 
     ckpt = checkpoint(args.model)
+
     if not ckpt.exists():
         raise SystemExit(f"No trained model at {ckpt}. Run `python train_neural.py` first.")
+    
     model = load_model(ckpt)
 
     lbl = ["raw radar"] + [f"KF q = {q:g}" for q in Q_VAL] + ["GRU"]
@@ -35,6 +38,7 @@ def main():
     print("-" * len(hdr))
 
     for name, (mode, radar) in SCENARIOS.items():
+    
         tracks = simulate_batch(args.tracks, mode, radar, TARGET, seed=42)
         row = [rmse_over_tracks(raw_measurement_error(tracks))]
         row += [rmse_over_tracks(evaluate(tracks, ConstantVelocityKF(q=q))) for q in Q_VAL]

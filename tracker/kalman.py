@@ -34,8 +34,15 @@ class ConstantVelocityKF:
                                [0, dt**2 / 2, 0, dt]])
         return F, Q
 
-    def run(self, track: Track) -> np.ndarray:
-        """Filter one track; returns (T, 4) state estimates."""
+    def run(self, track: Track, return_diag: bool = False):
+        """Filter one track; returns (T, 4) state estimates.
+
+        With return_diag=True it returns (estimates, diag) where diag holds the filter's
+        own uncertainty, used to check whether the filter is consistent:
+          "P"   (T, 4, 4)  covariance after each step (predict-only on a missed scan)
+          "nis" (T,)       innovation statistic y^T S^-1 y at each detected scan;
+                           NaN at scan 0 and on missed scans (no innovation exists)
+        """
         radar = track.radar
         F, Q = self._matrices(radar.dt)
         H = np.array([[1, 0, 0, 0],
@@ -48,9 +55,13 @@ class ConstantVelocityKF:
         P[:2, :2] = R0
         P[2:, 2:] = np.eye(2) * self.init_speed_std ** 2
 
-        est = np.zeros((len(track.detected), 4))
+        T = len(track.detected)
+        est = np.zeros((T, 4))
         est[0] = x
-        for k in range(1, len(track.detected)):
+        Ps = np.zeros((T, 4, 4))
+        Ps[0] = P
+        nis = np.full(T, np.nan)
+        for k in range(1, T):
             # predict
             x = F @ x
             P = F @ P @ F.T + Q
@@ -61,8 +72,12 @@ class ConstantVelocityKF:
                 z = track.meas_xy[k]
                 y = z - H @ x
                 S = H @ P @ H.T + R
+                nis[k] = y @ np.linalg.solve(S, y)
                 K = P @ H.T @ np.linalg.inv(S)
                 x = x + K @ y
                 P = (np.eye(4) - K @ H) @ P
             est[k] = x
+            Ps[k] = P
+        if return_diag:
+            return est, {"P": Ps, "nis": nis}
         return est
