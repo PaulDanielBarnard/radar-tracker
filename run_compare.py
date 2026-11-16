@@ -1,9 +1,10 @@
-"""Compare Raw Radar, Kalman Filters and GRU on every scenario"""
+"""Compare Raw Radar, Kalman Filters, the IMM filter and the GRU on every scenario"""
 import argparse
 
 import numpy as np
 import torch
 
+from tracker.imm import default_imm
 from tracker.kalman import ConstantVelocityKF
 from tracker.metrics import evaluate, raw_measurement_error, rmse_over_tracks
 from tracker.neural import gru_estimates, load_model
@@ -31,7 +32,8 @@ def main():
     
     model = load_model(ckpt)
 
-    lbl = ["raw radar"] + [f"KF q = {q:g}" for q in Q_VAL] + ["GRU"]
+    lbl = ["raw radar"] + [f"KF q = {q:g}" for q in Q_VAL] + ["IMM", "GRU"]
+    imm = default_imm()
     hdr = f"{'scenario':<12}" + "".join(f"{lab:>12}" for lab in lbl)
     print("Position RMSE in metres (lower is better)\n")
     print(hdr)
@@ -42,6 +44,7 @@ def main():
         tracks = simulate_batch(args.tracks, mode, radar, TARGET, seed=42)
         row = [rmse_over_tracks(raw_measurement_error(tracks))]
         row += [rmse_over_tracks(evaluate(tracks, ConstantVelocityKF(q=q))) for q in Q_VAL]
+        row += [rmse_over_tracks(evaluate(tracks, imm))]
         row += [rmse_over_tracks(gru_errors(model, tracks))]
         best = int(np.argmin(row))
         cells = "".join(f"{v:>11.1f}{'*' if i == best else ' '}" for i, v in enumerate(row))

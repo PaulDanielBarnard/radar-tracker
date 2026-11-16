@@ -25,6 +25,10 @@ _PROB_FLOOR = 1e-12     # keeps a mode probability from collapsing to exactly 0 
 # 0.05 rad/s, the simulator's maximum turn rate (real trackers also know their aircraft's limits).
 TUNED_MODELS = [("cv", 1.0), ("cv", 100.0), ("ct", 0.05, 10.0), ("ct", -0.05, 10.0)]
 
+# Probability of staying in the same model from one scan to the next, also chosen on the
+# validation seeds (tried 0.90, 0.95, 0.98; score 1.017, 0.982, 0.960; lower is better).
+TUNED_STAY = 0.98
+
 
 def default_transition(n_models: int, stay: float = 0.95) -> np.ndarray:
     """Transition matrix: stay in the same model with probability `stay`, else switch evenly."""
@@ -161,3 +165,8 @@ class IMMFilter:
         if return_diag:
             return est, {"P": P_out, "mu": mus, "nis": nis}
         return est
+
+
+def default_imm() -> IMMFilter:
+    """The IMM configuration used by the evaluation scripts."""
+    return IMMFilter(models=TUNED_MODELS, pi=default_transition(len(TUNED_MODELS), TUNED_STAY))

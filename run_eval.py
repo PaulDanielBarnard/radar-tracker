@@ -8,6 +8,7 @@ import argparse
 
 import numpy as np
 
+from tracker.imm import default_imm
 from tracker.kalman import ConstantVelocityKF
 from tracker.metrics import BURN_IN, evaluate, raw_measurement_error, rmse_over_tracks
 from tracker.neural import gru_estimates, load_model
@@ -36,6 +37,7 @@ def method_rmses(tracks, model):
     scores = {"raw radar": rmse_over_tracks(raw_measurement_error(tracks))}
     for q in Q_VAL:
         scores[f"KF q={q:g}"] = rmse_over_tracks(evaluate(tracks, ConstantVelocityKF(q=q)))
+    scores["IMM"] = rmse_over_tracks(evaluate(tracks, default_imm()))
     scores["GRU"] = rmse_over_tracks(gru_errors(model, tracks))
     return scores
 
@@ -55,11 +57,11 @@ def best_kalman(results):
     return min(kalmans, key=lambda m: results[m].mean())
 
 
-def verdict(diff, half):
-    """Is the GRU - Kalman difference clearly away from zero? (negative = GRU has less error)"""
+def verdict(diff, half, a="GRU", b="Kalman"):
+    """Is the a - b difference clearly away from zero? (negative = a has less error)"""
     if abs(diff) <= half:
         return "no clear difference"
-    return "GRU better" if diff < 0 else "Kalman better"
+    return f"{a} better" if diff < 0 else f"{b} better"
 
 
 def print_table(all_results, seeds, n_tracks):
@@ -97,15 +99,27 @@ def print_verdicts(all_results):
         print(f"{name:<12}{kf:>13}{f'{diff:+.1f}+/-{half:.1f}':>20}   {verdict(diff, half)}")
 
 
-def consistency_stats(tracks, q):
-    """Mean NEES and mean NIS of one Kalman setting on a batch of tracks.
+def print_imm_verdicts(all_results):
+    """The IMM filter against the best single Kalman filter, and the GRU against the IMM."""
+    print("\nIMM vs the best Kalman setting, and GRU vs the IMM (paired by seed; negative = first has less error)\n")
+    print(f"{'scenario':<12}{'IMM - best KF (m)':>20}   {'verdict':<20}{'GRU - IMM (m)':>16}   verdict")
+    print("-" * 84)
+    for name, results in all_results.items():
+        kf = best_kalman(results)
+        d1, h1 = paired_diff_ci(results["IMM"], results[kf])
+        d2, h2 = paired_diff_ci(results["GRU"], results["IMM"])
+        print(f"{name:<12}{f'{d1:+.1f}+/-{h1:.1f} ({kf[3:]})':>20}   {verdict(d1, h1, 'IMM', 'Kalman'):<20}"
+              f"{f'{d2:+.1f}+/-{h2:.1f}':>16}   {verdict(d2, h2, 'GRU', 'IMM')}")
+
+
+def consistency_stats(tracks, filt):
+    """Mean NEES and mean NIS of one filter (anything with run(track, return_diag=True)).
 
     Averaged over tracks first, then over time, skipping the first BURN_IN scans.
     """
-    kf = ConstantVelocityKF(q=q)
     nees_runs, nis_runs = [], []
     for t in tracks:
-        est, diag = kf.run(t, return_diag=True)
+        est, diag = filt.run(t, return_diag=True)
         nees_runs.append(nees(t.truth, est, diag["P"]))
         nis_runs.append(diag["nis"])                      # NaN on missed scans
     mean_nees = float(np.mean(np.array(nees_runs)[:, BURN_IN:]))
@@ -125,15 +139,17 @@ def print_consistency(n_tracks):
     print(f"\nFilter consistency on one batch of {n_tracks} tracks per scenario (scans after burn-in)")
     print(f"ideal mean NEES = {IDEAL_NEES:g} (95% band for a single scan: {lo:.2f} to {hi:.2f}), "
           f"ideal mean NIS = {IDEAL_NIS:g}; 'consistent' = within {TOLERANCE:.0%} of the ideal\n")
-    header = f"{'scenario':<12}{'q':>7}{'NEES':>12}  {'NEES verdict':<14}{'NIS':>8}  NIS verdict"
+    header = f"{'scenario':<12}{'filter':>9}{'NEES':>12}  {'NEES verdict':<14}{'NIS':>8}  NIS verdict"
     print(header)
-    print("-" * 66)
+    print("-" * 68)
+    filters = [(f"q={q:g}", ConstantVelocityKF(q=q)) for q in Q_VAL] + [("IMM", default_imm())]
     for name, (mode, radar) in SCENARIOS.items():
         tracks = simulate_batch(n_tracks, mode, radar, TARGET, seed=SEED_BASE)
-        for q in Q_VAL:
-            mean_nees, mean_nis = consistency_stats(tracks, q)
-            print(f"{name:<12}{q:>7g}{mean_nees:>12.1f}  {consistency_label(mean_nees, IDEAL_NEES):<14}"
+        for label, filt in filters:
+            mean_nees, mean_nis = consistency_stats(tracks, filt)
+            print(f"{name:<12}{label:>9}{mean_nees:>12.1f}  {consistency_label(mean_nees, IDEAL_NEES):<14}"
                   f"{mean_nis:>8.2f}  {consistency_label(mean_nis, IDEAL_NIS)}")
+    print("IMM: its NIS is computed from the combined (mixture) prediction.")
     print("GRU: n/a (it predicts no covariance, so NEES and NIS cannot be computed)")
 
 
@@ -165,6 +181,7 @@ def main():
     print()
     print_table(all_results, args.seeds, args.tracks)
     print_verdicts(all_results)
+    print_imm_verdicts(all_results)
     print_consistency(args.tracks)
 
 
