@@ -14,10 +14,16 @@ Each scan has four steps:
 """
 import numpy as np
 
-from .kalman import H_POS, cv_matrices, initial_state, polar_to_cart_cov, predict, update
+from .kalman import (H_POS, ct_matrices, cv_matrices, initial_state, polar_to_cart_cov,
+                     predict, update)
 from .simulate import Track
 
 _PROB_FLOOR = 1e-12     # keeps a mode probability from collapsing to exactly 0 (division by 0)
+
+# The model set chosen by a sweep on validation seeds (3000 and up, never the test seeds):
+# a calm and an agile straight-flight model plus a left and a right coordinated turn at
+# 0.05 rad/s, the simulator's maximum turn rate (real trackers also know their aircraft's limits).
+TUNED_MODELS = [("cv", 1.0), ("cv", 100.0), ("ct", 0.05, 10.0), ("ct", -0.05, 10.0)]
 
 
 def default_transition(n_models: int, stay: float = 0.95) -> np.ndarray:
@@ -58,14 +64,22 @@ def _log_likelihood(y, S):
 class IMMFilter:
     """IMM filter over constant-velocity models that differ only in their process noise q.
 
-    qs         process-noise intensity of each model, e.g. (1, 100): a calm one and an agile one
+    qs         process-noise intensity of each constant-velocity model, e.g. (1, 100): a calm
+               one and an agile one
     pi         model transition matrix (rows sum to 1); default: stay with probability 0.95
     mu0        starting mode probabilities; default: equal
+    models     optional list of model specs that replaces `qs`:
+                 ("cv", q)           constant velocity with process noise q
+                 ("ct", omega, q)    coordinated turn at omega rad/s (+ left, - right)
     """
 
-    def __init__(self, qs=(1.0, 100.0), pi=None, mu0=None, init_speed_std: float = 200.0):
-        self.qs = tuple(float(q) for q in qs)
-        M = len(self.qs)
+    def __init__(self, qs=(1.0, 100.0), pi=None, mu0=None, init_speed_std: float = 200.0,
+                 models=None):
+        if models is None:
+            models = [("cv", float(q)) for q in qs]
+        self.models = [self._check_spec(spec) for spec in models]
+        self.qs = tuple(spec[-1] for spec in self.models)      # process noise of every model
+        M = len(self.models)
         self.pi = default_transition(M) if pi is None else np.asarray(pi, dtype=float)
         if self.pi.shape != (M, M) or not np.allclose(self.pi.sum(axis=1), 1.0) or (self.pi < 0).any():
             raise ValueError(f"pi must be a {M}x{M} matrix of probabilities with rows summing to 1")
@@ -74,9 +88,19 @@ class IMMFilter:
             raise ValueError(f"mu0 must be {M} probabilities summing to 1")
         self.init_speed_std = init_speed_std
 
+    @staticmethod
+    def _check_spec(spec):
+        kind = spec[0]
+        if kind == "cv" and len(spec) == 2:
+            return ("cv", float(spec[1]))
+        if kind == "ct" and len(spec) == 3:
+            return ("ct", float(spec[1]), float(spec[2]))
+        raise ValueError(f"model spec must be ('cv', q) or ('ct', omega, q), got {spec!r}")
+
     def _model_matrices(self, dt: float):
-        """(F, Q) of every model. A later extension can add other kinds of motion model here."""
-        return [cv_matrices(q, dt) for q in self.qs]
+        """(F, Q) of every model."""
+        return [cv_matrices(spec[1], dt) if spec[0] == "cv" else ct_matrices(spec[1], spec[2], dt)
+                for spec in self.models]
 
     def run(self, track: Track, return_diag: bool = False):
         """Filter one track; returns (T, 4) state estimates.

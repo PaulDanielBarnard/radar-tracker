@@ -1,8 +1,8 @@
 import numpy as np
 import pytest
 
-from tracker.imm import IMMFilter, _combine, _mix, default_transition
-from tracker.kalman import ConstantVelocityKF
+from tracker.imm import TUNED_MODELS, IMMFilter, _combine, _mix, default_transition
+from tracker.kalman import ConstantVelocityKF, ct_matrices, cv_matrices
 from tracker.metrics import evaluate, rmse_over_tracks
 from tracker.scenarios import BASE_RADAR, TARGET
 from tracker.simulate import RadarConfig, TargetConfig, simulate_batch
@@ -113,6 +113,53 @@ def test_mixing_with_even_switching_blends_both_models_equally():
         np.testing.assert_allclose(x0[j], [2.0, 0.0, 0.0, 0.0])        # both start at the midpoint
         assert P0[j][0, 0] == pytest.approx(1.0 + 4.0)                 # own variance + (2 m)^2 spread
     np.testing.assert_allclose(c, [0.5, 0.5])
+
+
+def test_a_coordinated_turn_with_zero_turn_rate_is_exactly_constant_velocity():
+    F_ct, Q_ct = ct_matrices(0.0, 7.0, 1.0)
+    F_cv, Q_cv = cv_matrices(7.0, 1.0)
+    np.testing.assert_array_equal(F_ct, F_cv)
+    np.testing.assert_array_equal(Q_ct, Q_cv)
+
+
+def test_a_coordinated_turn_keeps_a_target_on_its_circle_at_constant_speed():
+    omega, speed = 0.05, 200.0
+    F, _ = ct_matrices(omega, 1.0, 1.0)
+    x = np.array([0.0, 0.0, speed, 0.0])                    # heading east, turning left (omega > 0)
+    center = np.array([0.0, speed / omega])                 # radius speed/omega = 4000 m, above the start
+    for _ in range(60):
+        x = F @ x
+        assert np.linalg.norm(x[:2] - center) == pytest.approx(speed / omega, rel=1e-9)
+        assert np.linalg.norm(x[2:]) == pytest.approx(speed, rel=1e-9)
+    G, _ = ct_matrices(-omega, 1.0, 1.0)                    # negative omega turns right: mirror image
+    y = G @ np.array([0.0, 0.0, speed, 0.0])
+    assert x[1] > 0 and y[1] < 0                            # left turn drifts north, right turn south
+
+
+def test_turn_models_make_the_imm_clearly_better_in_turns():
+    turning = simulate_batch(20, "turn", BASE_RADAR, TARGET, seed=77)
+    cv_only = rmse_over_tracks(evaluate(turning, IMMFilter(qs=(1.0, 100.0))))
+    with_turns = rmse_over_tracks(evaluate(turning, IMMFilter(models=TUNED_MODELS)))
+    assert with_turns < 0.85 * cv_only            # measured about 34% lower on validation seeds
+
+
+def test_models_can_be_given_as_specs_and_the_old_qs_interface_still_works():
+    t = simulate_batch(1, "random", RadarConfig(p_detect=0.8), TargetConfig(), seed=4)[0]
+    from_qs = IMMFilter(qs=(1.0, 100.0)).run(t)
+    from_specs = IMMFilter(models=[("cv", 1.0), ("cv", 100.0)]).run(t)
+    np.testing.assert_array_equal(from_qs, from_specs)
+    imm = IMMFilter(models=[("cv", 1.0), ("ct", 0.03, 10.0), ("ct", -0.03, 10.0)])
+    assert imm.qs == (1.0, 10.0, 10.0)
+    assert imm.pi.shape == (3, 3)
+    est, diag = imm.run(t, return_diag=True)
+    assert est.shape == (len(t.detected), 4) and diag["mu"].shape == (len(t.detected), 3)
+    np.testing.assert_allclose(diag["mu"].sum(axis=1), 1.0)
+
+
+def test_bad_model_specs_are_rejected():
+    for bad in ([("cv",)], [("ct", 0.03)], [("zz", 1.0)], [("cv", 1.0, 2.0)]):
+        with pytest.raises(ValueError):
+            IMMFilter(models=bad)
 
 
 def test_default_transition_matrix_stays_with_the_stated_probability():

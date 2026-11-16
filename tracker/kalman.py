@@ -36,6 +36,24 @@ def cv_matrices(q: float, dt: float):
     return F, Q
 
 
+def ct_matrices(omega: float, q: float, dt: float):
+    """Coordinated-turn motion model: the velocity vector rotates at turn rate `omega` (rad/s).
+
+    omega > 0 turns counter-clockwise, omega < 0 clockwise. The target flies a circle of
+    radius speed/|omega|. For omega -> 0 this is exactly the constant-velocity model. The
+    process noise is the same as for constant velocity, so `q` means the same thing.
+    """
+    _, Q = cv_matrices(q, dt)
+    if abs(omega * dt) < 1e-9:
+        return cv_matrices(q, dt)
+    s, c = np.sin(omega * dt), np.cos(omega * dt)
+    F = np.array([[1, 0, s / omega, -(1 - c) / omega],
+                  [0, 1, (1 - c) / omega, s / omega],
+                  [0, 0, c, -s],
+                  [0, 0, s, c]], dtype=float)
+    return F, Q
+
+
 def initial_state(z_xy, R0, init_speed_std: float):
     """Start a track at its first plot: velocity 0 with a large velocity uncertainty."""
     x = np.array([z_xy[0], z_xy[1], 0.0, 0.0])
