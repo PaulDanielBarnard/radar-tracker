@@ -52,8 +52,8 @@ python -m pytest                       # all tests should pass
 |---|---|---|
 | `python run_baseline.py` | Kalman filters (4 settings) vs raw radar on every scenario; saves plots to `outputs/` | seconds |
 | `python train_neural.py --hybrid --randomize --hidden 128 --layers 2 --epochs 50` | trains the GRU and saves `outputs/gru_tracker.pt` | about 5 minutes on a laptop CPU |
-| `python run_compare.py` | one table: raw radar vs Kalman vs GRU (needs the trained model) | a minute or two |
-| `python run_eval.py` | the same comparison over 10 random seeds with confidence intervals and a filter-consistency check | roughly 15 minutes (`--seeds 2 --tracks 30` for a quick look) |
+| `python run_compare.py` | one table: raw radar vs Kalman vs IMM vs GRU (needs the trained model) | a few minutes |
+| `python run_eval.py` | the same comparison over 10 random seeds with confidence intervals and a filter-consistency check | about 30 minutes (`--seeds 2 --tracks 30` for a quick look) |
 | `python export_demo.py` | bakes example tracks and results into `web/data.js` | a minute or two |
 | `python -m http.server 8000 -d web` | serves the demo page at http://localhost:8000 | instant |
 
@@ -261,12 +261,77 @@ and the test tracks use seed 42 (`run_baseline.py`, `run_compare.py`, `export_de
 or seeds 10,000 and up (`run_eval.py`). None overlap, so the models are always judged on
 tracks they have never seen.
 
+### 3.7 The IMM filter (`tracker/imm.py`)
+
+**The idea.** One Kalman filter must pick one `q`. An **IMM** (Interacting Multiple Model)
+filter runs **several filters at once**, each built for a different kind of flight, and keeps
+a running belief about which one fits right now. That belief is the **mode probabilities**
+(they always add up to 1).
+
+The four models used (`TUNED_MODELS` in `tracker/imm.py`):
+
+| model | what it expects |
+|---|---|
+| calm straight (`q` = 1) | steady flight |
+| agile straight (`q` = 100) | straight flight with surprises |
+| left turn (turn rate +0.05 rad/s, `q` = 10) | the target is circling left |
+| right turn (turn rate -0.05 rad/s, `q` = 10) | the target is circling right |
+
+A **coordinated-turn** model predicts that the velocity vector *rotates* at a fixed **turn
+rate**, so the target flies a circle of radius speed / turn rate (200 m/s at 0.05 rad/s is a
+circle of 4,000 m). At turn rate 0 it is exactly the constant-velocity model.
+
+**Each scan has four steps.** `Pi[i][j]` is the chance of switching from model i to model j
+between scans, and `mu_i` is the current probability of model i.
+
+```
+1. MIX      c_j     = sum_i Pi[i][j] * mu_i                 chance the target is in model j now
+            mu_i|j  = Pi[i][j] * mu_i / c_j                 chance it was in model i, given model j now
+            x0_j    = sum_i mu_i|j * x_i                    filter j restarts from this blend
+            P0_j    = sum_i mu_i|j * (P_i + (x_i - x0_j)(x_i - x0_j)^T)
+                      (the second term is the spread: disagreement between filters adds uncertainty)
+2. FILTER   every model runs its own Kalman predict and update
+3. SCORE    L_j     = exp(-0.5 y^T S^-1 y) / sqrt(det(2 pi S))      how well model j predicted the plot
+4. COMBINE  mu_j    = L_j * c_j / sum_k (L_k * c_k)         new mode probabilities
+            x       = sum_j mu_j * x_j                      output: probability-weighted average
+            P       = sum_j mu_j * (P_j + (x_j - x)(x_j - x)^T)
+```
+
+With no plot (a missed scan) there is no evidence, so the probabilities simply follow `Pi`
+(`mu = c`) while every filter coasts.
+
+**A worked example** (two models, a calm one A and an agile one B; stay probability 0.95;
+the numbers were checked by running the code):
+
+| Step | Result |
+|---|---|
+| Starting belief | `mu` = [0.8, 0.2]: probably calm |
+| Predicted probabilities | c_A = 0.95 x 0.8 + 0.05 x 0.2 = **0.77**, c_B = 0.05 x 0.8 + 0.95 x 0.2 = **0.23** |
+| Where did B's start come from? | 0.05 x 0.8 / 0.23 = **17%** from A, **83%** from B |
+| A turn begins: the calm model is surprised | likelihoods L_A = 0.02, L_B = 0.08 |
+| New belief | A: 0.77 x 0.02 = 0.0154, B: 0.23 x 0.08 = 0.0184, normalised: `mu` = **[0.456, 0.544]** |
+
+In one scan the belief flipped from 80/20 for the calm model to 46/54, and over the next
+few scans it moves further as the evidence keeps adding up.
+
+**How it was set up honestly.** The model set and the stay probability were chosen by
+sweeps on *validation* seeds (3000 and up), never on the test seeds, trying three turn rates
+(0.02, 0.03, 0.05 rad/s) and three stay probabilities (0.90, 0.95, 0.98; the chosen 0.98
+scored best). With a single model the IMM is bit-for-bit the plain Kalman filter, which a
+test checks.
+
+**Limits.** The turn rate (0.05 rad/s) is the simulator's maximum, so the IMM is tuned to this
+simulator. Real trackers also know their aircraft's turn limits, but the comparison with the
+GRU, which had to learn everything from examples, is not tilt-free. And the IMM still loses to
+a very calm Kalman filter on straight flight (section 7.1).
+
 ## 4. Project map
 
 | Path | Purpose |
 |---|---|
 | `tracker/simulate.py` | the radar and target simulator; `Track` data; `simulate_batch`; `forward_fill` |
-| `tracker/kalman.py` | the constant-velocity Kalman filter, with optional covariance and NIS output |
+| `tracker/kalman.py` | the constant-velocity Kalman filter, reusable `predict` and `update` steps, the coordinated-turn model, optional covariance and NIS output |
+| `tracker/imm.py` | the IMM filter (several Kalman filters blended by mode probability) and its tuned settings |
 | `tracker/metrics.py` | position error, RMSE (with burn-in), and the shared evaluation helpers |
 | `tracker/scenarios.py` | the five test scenarios, the Kalman `q` values, and `random_radar` for training |
 | `tracker/dataset.py` | turns tracks into tensors for the network; the input features; hybrid features |
@@ -275,14 +340,16 @@ tracks they have never seen.
 | `tracker/paths.py` | where `outputs/` and the model files live |
 | `run_baseline.py` | table of Kalman settings vs raw radar, plus two plots in `outputs/` |
 | `train_neural.py` | trains the GRU and prints a per-scenario report |
-| `run_compare.py` | one table: raw radar, Kalman, GRU on seed-42 test tracks |
-| `run_eval.py` | multi-seed evaluation: confidence intervals, paired verdicts, filter consistency |
+| `run_compare.py` | one table: raw radar, Kalman, IMM, GRU on seed-42 test tracks |
+| `run_eval.py` | multi-seed evaluation of raw radar, Kalman, IMM and GRU: confidence intervals, paired verdicts, filter consistency |
 | `export_demo.py` | writes `web/data.js` (example tracks and results) for the demo page |
 | `web/index.html` | the demo page: radar (PPI) view, close-up view, results bars |
 | `web/data.js` | generated by `export_demo.py`; committed so the site works without training |
 | `tests/test_tracker.py` | simulator and Kalman filter tests |
 | `tests/test_neural.py` | dataset, model save/load, zero-start and hybrid tests |
 | `tests/test_stats.py` | tests for the statistics helpers and the Kalman diagnostics |
+| `tests/test_kalman_refactor.py` | proves the reusable Kalman steps give bit-identical results to the original loop |
+| `tests/test_imm.py` | IMM filter, mixing, combining, turn-model and mode-probability tests |
 | `.github/workflows/pages.yml` | publishes `web/` to GitHub Pages when it changes on `main` |
 | `requirements.txt` | Python dependencies (numpy, matplotlib, pytest, torch, scipy) |
 | `.gitignore` | keeps the virtual environment, caches and `outputs/` out of git |
@@ -376,17 +443,17 @@ All GRU numbers are for the recommended model, trained with
 Position RMSE in metres, mean +/- 95% interval over 10 seeds of 200 tracks each. Lower is
 better; the best mean in each row is bold.
 
-| scenario | raw radar | KF q=0.1 | KF q=1 | KF q=10 | KF q=100 | GRU |
-|---|---|---|---|---|---|---|
-| straight | 205.6 ± 2.0 | **57.6 ± 0.8** | 63.3 ± 0.7 | 76.1 ± 0.7 | 96.0 ± 0.7 | 81.7 ± 0.7 |
-| turning | 192.7 ± 2.6 | 2081.3 ± 46.4 | 920.0 ± 20.9 | 327.8 ± 7.6 | 134.6 ± 2.4 | **104.9 ± 1.6** |
-| maneuvers | 202.1 ± 3.5 | 1039.7 ± 43.7 | 505.1 ± 18.0 | 216.9 ± 5.2 | 118.7 ± 1.8 | **113.6 ± 1.9** |
-| noisy | 606.3 ± 10.5 | 1687.3 ± 74.2 | 1021.6 ± 41.9 | 516.2 ± 16.6 | 297.8 ± 4.7 | **286.2 ± 4.3** |
-| missed_30 | 296.7 ± 4.2 | 1153.2 ± 46.9 | 585.7 ± 21.0 | 262.1 ± 6.0 | 146.4 ± 1.9 | **141.6 ± 2.0** |
+| scenario | raw radar | KF q=0.1 | KF q=1 | KF q=10 | KF q=100 | IMM | GRU |
+|---|---|---|---|---|---|---|---|
+| straight | 205.6 ± 2.0 | **57.6 ± 0.8** | 63.3 ± 0.7 | 76.1 ± 0.7 | 96.0 ± 0.7 | 70.2 ± 0.7 | 81.7 ± 0.7 |
+| turning | 192.7 ± 2.6 | 2081.3 ± 46.4 | 920.0 ± 20.9 | 327.8 ± 7.6 | 134.6 ± 2.4 | **95.6 ± 1.4** | 104.9 ± 1.6 |
+| maneuvers | 202.1 ± 3.5 | 1039.7 ± 43.7 | 505.1 ± 18.0 | 216.9 ± 5.2 | 118.7 ± 1.8 | **111.1 ± 1.4** | 113.6 ± 1.9 |
+| noisy | 606.3 ± 10.5 | 1687.3 ± 74.2 | 1021.6 ± 41.9 | 516.2 ± 16.6 | 297.8 ± 4.7 | **275.4 ± 3.6** | 286.2 ± 4.3 |
+| missed_30 | 296.7 ± 4.2 | 1153.2 ± 46.9 | 585.7 ± 21.0 | 262.1 ± 6.0 | 146.4 ± 1.9 | **136.5 ± 1.3** | 141.6 ± 2.0 |
 
-Paired difference, GRU minus the best Kalman setting (negative means the GRU has less error):
+Paired differences (negative means the first method has less error):
 
-| scenario | best Kalman | GRU minus Kalman (m) | verdict |
+| scenario | best single Kalman | GRU minus Kalman (m) | verdict |
 |---|---|---|---|
 | straight | q=0.1 | +24.2 ± 0.7 | Kalman better |
 | turning | q=100 | -29.7 ± 1.3 | GRU better |
@@ -394,50 +461,69 @@ Paired difference, GRU minus the best Kalman setting (negative means the GRU has
 | noisy | q=100 | -11.6 ± 3.3 | GRU better |
 | missed_30 | q=100 | -4.8 ± 1.2 | GRU better |
 
+| scenario | IMM minus best Kalman (m) | verdict | GRU minus IMM (m) | verdict |
+|---|---|---|---|---|
+| straight | +12.6 ± 0.4 (q=0.1) | Kalman better | +11.6 ± 0.5 | IMM better |
+| turning | -39.1 ± 2.0 (q=100) | IMM better | +9.4 ± 1.2 | IMM better |
+| maneuvers | -7.6 ± 0.7 (q=100) | IMM better | +2.4 ± 0.9 | IMM better |
+| noisy | -22.4 ± 2.9 (q=100) | IMM better | +10.8 ± 2.2 | IMM better |
+| missed_30 | -9.8 ± 1.0 (q=100) | IMM better | +5.0 ± 1.3 | IMM better |
+
 What to take from it:
-- **The GRU wins four of five scenarios, the Kalman filter wins straight flight.** On straight
-  flight a very steady filter (q=0.1) averages the noise away almost perfectly (57.6 m); the
-  GRU cannot match that (81.7 m).
+- **Against single Kalman filters the GRU wins four of five scenarios.** Straight flight goes to a
+  very steady filter (q=0.1), which averages the noise away almost perfectly (57.6 m against 81.7 m).
+- **A well-tuned IMM does better still. It beats the GRU in all five scenarios and the best
+  single Kalman filter in four of five.** Every interval excludes zero. A classical filter
+  whose models match the problem (calm, agile, left turn, right turn) beat a network that had to
+  learn the motion from examples. Only straight flight stays with q=0.1 (57.6 m against 70.2 m
+  for the IMM), because the IMM's extra agile models cost it some smoothing there.
+- **The comparison is not tilt-free.** The IMM was given the simulator's maximum turn rate; the
+  GRU had to discover it. Real trackers do know their aircraft's limits, but against targets whose
+  dynamics are unknown the balance could shift.
 - **The turning scenario shows the q tradeoff at its most extreme.** The q=0.1 filter is
   off by about 2 km (it keeps flying straight while the target turns); q=100 gets 134.6 m.
-  The GRU, which can adapt, reaches 104.9 m.
+  The GRU, which can adapt, reaches 104.9 m, and the IMM, which switches to a turn model, 95.6 m.
 - **Everything beats raw radar**, except the badly tuned filters in turns and noise.
-- **The small wins are real.** On maneuvers (-5.1 m) and missed scans (-4.8 m) the intervals
-  exclude zero, so the GRU's edge is not luck.
+- **The small wins are real.** On maneuvers the GRU beats the best Kalman by 5.1 m and the
+  IMM beats the GRU by 2.4 m; both intervals exclude zero, so neither edge is luck.
 
-### 7.2 Is each Kalman filter honest? (one batch of 200 tracks per scenario)
+### 7.2 Is each filter honest? (one batch of 200 tracks per scenario)
 
 Mean **NEES** after the 10-scan burn-in (ideal 4; 95% band for a single scan 3.62 to 4.40):
 
-| scenario | q=0.1 | q=1 | q=10 | q=100 | reading |
+| scenario | q=0.1 | q=1 | q=10 | q=100 | IMM | reading |
+|---|---|---|---|---|---|---|
+| straight | 2.5 | 2.2 | 2.1 | 2.1 | 1.8 | every filter is **too cautious** |
+| turning | 14,098 | 1,088 | 65.9 | 5.5 | 2.8 | every Kalman q is **overconfident**; the IMM is slightly too cautious |
+| maneuvers | 3,652 | 357 | 29.5 | 3.8 | 4.0 | q=100 and the IMM are **consistent** |
+| noisy | 2,938 | 370 | 37.6 | 4.8 | 4.4 | q=100 slightly overconfident (20% above ideal); the IMM is consistent |
+| missed_30 | 3,609 | 368 | 31.5 | 4.0 | 4.0 | q=100 and the IMM are **consistent** |
+
+Mean **NIS** (ideal 2; the IMM's is computed from its combined prediction):
+
+| scenario | q=0.1 | q=1 | q=10 | q=100 | IMM |
 |---|---|---|---|---|---|
-| straight | 2.5 | 2.2 | 2.1 | 2.1 | every q is **too cautious** |
-| turning | 14,098 | 1,088 | 65.9 | 5.5 | every q is **overconfident**; q=100 only slightly |
-| maneuvers | 3,652 | 357 | 29.5 | 3.8 | only q=100 is **consistent** |
-| noisy | 2,938 | 370 | 37.6 | 4.8 | q=100 slightly overconfident (20% above ideal) |
-| missed_30 | 3,609 | 368 | 31.5 | 4.0 | only q=100 is **consistent** |
-
-Mean **NIS** (ideal 2):
-
-| scenario | q=0.1 | q=1 | q=10 | q=100 |
-|---|---|---|---|---|
-| straight | 1.96 | 1.92 | 1.86 | 1.74 |
-| turning | 368.0 | 62.4 | 9.28 | 2.56 |
-| maneuvers | 83.3 | 18.8 | 4.54 | 2.10 |
-| noisy | 31.1 | 10.4 | 3.67 | 2.14 |
-| missed_30 | 102.6 | 23.7 | 5.40 | 2.16 |
+| straight | 1.96 | 1.92 | 1.86 | 1.74 | 1.82 |
+| turning | 368.0 | 62.4 | 9.28 | 2.56 | 1.94 |
+| maneuvers | 83.3 | 18.8 | 4.54 | 2.10 | 2.04 |
+| noisy | 31.1 | 10.4 | 3.67 | 2.14 | 2.04 |
+| missed_30 | 102.6 | 23.7 | 5.40 | 2.16 | 2.05 |
 
 What to take from it:
 - **q=100 is nearly honest in every scenario with maneuvers.** Its claimed uncertainty matches
   its real errors, so large `q` is the right model for aircraft that turn.
 - **q=0.1 is wildly overconfident in turns** (NEES about 14,000 against an ideal of 4). It is
   certain of its path while being 2 km wrong. This is the lag problem, now measured.
-- **On straight flight every q reads below 4.** Even q=0.1 is too cautious, because the
+- **The IMM is the most honest filter overall.** It is consistent on maneuvers, noisy radar and
+  missed scans (NEES 4.0 to 4.4), and its NIS is within 3% of the ideal 2 in four scenarios and
+  within 9% on straight flight (1.82). In turns it is even a little cautious (NEES 2.8) where
+  every single Kalman filter is overconfident.
+- **On straight flight every filter reads below 4.** Even q=0.1 is too cautious, because the
   simulated target really never accelerates. An even smaller `q` would be the honest one.
 - **No single `q` is honest everywhere.** That is the formal version of "one knob cannot fit
-  all scenarios".
+  all scenarios", and the IMM is the fix: it switches model instead of compromising.
 - **The GRU has no NEES.** It outputs a position, not an uncertainty, so this check cannot be
-  applied to it. That is a real limitation compared with a Kalman filter.
+  applied to it. That is a real limitation compared with a Kalman filter or an IMM.
 
 ### 7.3 Beyond the training range
 
@@ -478,6 +564,17 @@ lets you be **sure** of it.
   167.8 to 154.5 m), by stopping noisy tracks from drowning out quiet ones.
 - **Randomising the radar during training helped on unseen conditions** (50% missed scans:
   212.3 to 195.1 m), though not on the five fixed scenarios it was never specifically shown.
+- **A well-tuned classical filter beat the learned one.** The IMM beat the GRU in every
+  scenario, with every interval excluding zero. Before reaching for a neural network, build the
+  strongest classical baseline you can; the network's value is that it needs no motion model
+  spelled out, not that it beats a model matched to the problem.
+- **Tune on validation data, test on fresh seeds.** The IMM's models and stay probability came
+  from sweeps on seeds 3000 and up and never touched the test seeds, so the final numbers are not
+  flattered by the tuning.
+- **Deliberately breaking code finds weak tests.** Mutation checks on the IMM exposed two
+  behaviours nothing tested (coasting through missed scans, and adding the spread between models
+  when combining), and one test that rested on a wrong premise: with switching forbidden,
+  evidence still accumulates, so the agile model eventually takes over a maneuvering track.
 - **A negative result is still a result.** "Training longer does not help" saved time and
   pointed at the real limits.
 - **Pairing, many seeds and consistency checks changed what we could claim.** The small wins
@@ -515,6 +612,13 @@ lets you be **sure** of it.
 | consistent | the filter's claimed uncertainty matches its real errors |
 | overconfident | real errors are larger than the filter claims (NEES above the ideal) |
 | too cautious | real errors are smaller than the filter claims (NEES below the ideal) |
+| IMM | Interacting Multiple Model: several filters run at once and are blended by how well each fits |
+| mode probability | the IMM's current belief about which motion model is right (always sums to 1) |
+| transition matrix (`Pi`) | the chance of switching from motion model i to j between scans; its diagonal is the "stay" probability |
+| mixing | the IMM step where every filter restarts from a blend of all filters' estimates |
+| likelihood | how probable the new plot was under a model's prediction; high means that model predicted well |
+| coordinated turn | a motion model where the velocity rotates at a fixed turn rate, so the target flies a circle |
+| turn rate | how fast the heading changes, in radians per second (0.05 rad/s is about 2.9 degrees per second) |
 
 ## 10. Exam self-check
 
@@ -642,12 +746,41 @@ On straight flight (57.6 m against 81.7 m). With nothing to adapt to, a very ste
 the noise almost perfectly, while the GRU, trained on all kinds of motion, does not smooth that hard.
 </details>
 
+<details><summary><b>21.</b> What are the four steps the IMM filter repeats every scan?</summary>
+
+Mix (each filter restarts from a blend of all filters' estimates), filter (each model runs its own
+predict and update), score (how well each model predicted the new plot), and combine (update the mode
+probabilities and output the probability-weighted average of the states and covariances).
+</details>
+
+<details><summary><b>22.</b> An IMM of two straight-flight models that differ only in q never beat the best single filter. What fixed that?</summary>
+
+It was a compromise between two models that were each wrong during a turn. Adding coordinated-turn models
+gave it one that actually matches a turn, so in turns it could switch to a model that fits instead of
+averaging two that do not.
+</details>
+
+<details><summary><b>23.</b> Stay probability 0.95, belief [0.8, 0.2], then likelihoods 0.02 and 0.08. What is the new belief?</summary>
+
+Predicted probabilities: c = [0.77, 0.23]. Multiply by the likelihoods: 0.77 x 0.02 = 0.0154 and
+0.23 x 0.08 = 0.0184. Normalise: [0.456, 0.544]. The belief flipped from 80/20 to 46/54 in one scan.
+</details>
+
+<details><summary><b>24.</b> Why does the IMM's combined covariance include the spread between the filters?</summary>
+
+If the filters disagree, the true error is larger than any one filter's own variance suggests. The spread
+term (x_j - x)(x_j - x)^T adds that disagreement, so the combined uncertainty stays honest.
+</details>
+
+<details><summary><b>25.</b> What should the mode probabilities do during a run of missed scans?</summary>
+
+Nothing is learned without a plot, so they only follow the transition matrix (mu becomes Pi^T mu) and drift
+toward their long-run values while every filter coasts.
+</details>
+
 ## 11. Roadmap and further reading
 
-**Where the project could go next**
-- **IMM filter (Interacting Multiple Model):** run several Kalman filters at once (steady, agile,
-  turning) and blend them by how well each predicts the next plot. It attacks the "one `q`
-  cannot fit everything" problem directly, and is the fairest classical opponent for the GRU.
+**Where the project could go next** (the IMM filter is done, see sections 3.7 and 7)
 - **Several targets and false alarms:** gating (only consider plots near a prediction), the
   Hungarian algorithm for assigning plots to tracks, clutter as random false plots, and
   track management (confirm after M hits in N scans, drop after misses). This is the biggest
@@ -676,7 +809,7 @@ the noise almost perfectly, while the GRU, trained on all kinds of motion, does 
 - [x] Step 3: comparison by scenario (`run_compare.py`, `run_eval.py`)
 - [x] Step 4: browser demo with a traditional radar (PPI) view (`web/`)
 - [x] Rigorous evaluation: many seeds, confidence intervals, paired comparison, NEES and NIS
-- [ ] IMM filter as a stronger classical baseline
+- [x] IMM filter as a stronger classical baseline (it beat the GRU in every scenario)
 - [ ] Multi-target tracking with clutter
 - [ ] KalmanNet-style learned gain
 - [ ] Real ADS-B flight data
