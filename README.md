@@ -56,6 +56,7 @@ python -m pytest                       # all tests should pass
 | `python run_eval.py` | the same comparison over 10 random seeds with confidence intervals and a filter-consistency check | about 30 minutes (`--seeds 2 --tracks 30` for a quick look) |
 | `python train_kalmannet.py` | trains the learned-gain filter (section 3.9) and saves `outputs/kalmannet.pt`; `run_compare.py` and `run_eval.py` include it automatically once it exists | about 10 minutes |
 | `python run_eval.py --stress` | only the very noisy radar (300 m, 0.03 rad) that is beyond the training range | about 10 minutes |
+| `python run_adsb.py` | the trackers on a real recorded flight seen through a simulated radar; needs a CSV in `data/` (section 3.10) | about 1 minute |
 | `python run_multitarget.py` | the multi-target tracker on 1, 3 and 6 aircraft among 0, 5 and 20 false plots per scan, scored with OSPA | about 6 minutes (`--scenes 2` for a quick look) |
 | `python export_demo.py` | bakes example tracks and results into `web/data.js` | a minute or two |
 | `python -m http.server 8000 -d web` | serves the demo page at http://localhost:8000 | instant |
@@ -443,6 +444,51 @@ tracks, the noise-balanced position loss, early stopping, and gradient clipping 
 120 steps long, so gradients can blow up). It has 15,044 parameters, about a tenth of the 156,546 in
 the hybrid GRU.
 
+### 3.10 Real flights (`tracker/adsb.py`, `run_adsb.py`)
+
+**Why.** Every flight so far was invented by a simulator, with maneuvers the author chose. Real
+aircraft fly differently. **ADS-B** is a signal most aircraft broadcast with their own GPS
+position, picked up by volunteer receivers (the **OpenSky Network** collects it). A recorded
+flight is therefore a trustworthy **truth**, with real, human-flown maneuvers. The radar is still
+simulated: we add the usual range and bearing noise and missed plots, so only the *flying* is real.
+
+**How to get a sample.** Put a CSV of positions in `data/opensky_sample.csv` (the `data/` folder is
+ignored by git, so nothing is ever committed). It needs these columns:
+
+| column | meaning |
+|---|---|
+| `time` | seconds since 1970 (epoch seconds) |
+| `icao24` | the aircraft's address, to tell aircraft apart |
+| `lat`, `lon` | position in degrees |
+| `velocity`, `heading` | optional (not needed for tracking) |
+| `onground` | optional; rows marked true are skipped |
+
+OpenSky offers small public samples at https://opensky-network.org/datasets/ (the folder
+`incident-data/` holds extracts that already have these columns in a `state_vectors` file), and a
+free registration gives access to historical state vectors. Other header spellings such as `latitude`,
+`longitude`, `groundspeed` or `true_track` are accepted too. Please read and respect the licence of
+whatever you download (OpenSky's data is CC BY 4.0 and asks you to cite Schaefer et al., 2014).
+
+**From file to radar track** (`tracker/adsb.py`):
+
+```
+1. read      one flight per aircraft; skip rows on the ground or without a position
+2. project   latitude/longitude -> metres east and north of the flight's own origin
+3. split     cut where reports are more than 5 s apart, or imply more than 400 m/s (a glitch);
+             drop pieces shorter than 120 s or flying slower than 50 m/s (taxiing)
+4. resample  linear interpolation onto an exact 1-second grid (the radar scans once per second)
+5. window    cut 120-scan windows, the same length as the simulated tracks
+6. place     move each window so its centre is 20 to 60 km from a radar at the origin
+7. measure   truth = the real flight (velocity by finite differences); add radar noise and misses
+```
+
+The projection is **equirectangular**: one degree of latitude is about 111,195 m everywhere, and one
+degree of longitude is shorter by the cosine of the latitude (about 96,300 m at 30 degrees north).
+That is accurate to well under a metre per kilometre over the tens of kilometres of one window.
+
+**What to look for.** Does the ranking of trackers from the simulation survive contact with real
+flying? And is the best `q` still 100, or does a calmer real flight prefer less process noise?
+
 ## 4. Project map
 
 | Path | Purpose |
@@ -457,6 +503,7 @@ the hybrid GRU.
 | `tracker/metrics.py` | position error, RMSE (with burn-in), and the shared evaluation helpers |
 | `tracker/scenarios.py` | the five test scenarios, the Kalman `q` values, and `random_radar` for training |
 | `tracker/dataset.py` | turns tracks into tensors for the network; the input features; hybrid features |
+| `tracker/adsb.py` | loads ADS-B flights (csv module), projects, splits at gaps, resamples to 1 Hz, windows, places them near the radar, builds `Track`s |
 | `tracker/neural.py` | the GRU tracker, plus save and load of models together with their settings |
 | `tracker/kalmannet.py` | the learned-gain Kalman filter (a GRU outputs a bounded alpha-beta gain), its steady-state starting gain, save and load |
 | `tracker/stats.py` | confidence intervals, paired differences, NEES, chi-squared bounds |
@@ -466,6 +513,7 @@ the hybrid GRU.
 | `train_kalmannet.py` | trains the learned-gain filter and prints a per-scenario report |
 | `run_compare.py` | one table: raw radar, Kalman, IMM, GRU (and the learned-gain filter if trained) on seed-42 test tracks |
 | `run_eval.py` | multi-seed evaluation of raw radar, Kalman, IMM, GRU and the learned-gain filter: confidence intervals, paired verdicts, filter consistency; `--stress` for the very noisy radar |
+| `run_adsb.py` | evaluates raw radar, Kalman, IMM, GRU and the learned-gain filter on real flights in `data/opensky_sample.csv`, over several radar placements |
 | `run_multitarget.py` | multi-target evaluation: aircraft counts x clutter rates, scored with OSPA and the confirmed-track count |
 | `export_demo.py` | writes `web/data.js` (example tracks and results) for the demo page |
 | `web/index.html` | the demo page: radar (PPI) view, close-up view, results bars |
@@ -480,9 +528,11 @@ the hybrid GRU.
 | `tests/test_multitarget.py` | track manager: one target, clutter only, two targets, a vanishing target, coasting, duplicates |
 | `tests/test_ospa.py` | OSPA hand cases: equal sets, empty sets, a missing aircraft, a ghost, best pairing |
 | `tests/test_run_multitarget.py` | the multi-target scoring and one evaluation cell |
+| `tests/test_adsb.py` | the ADS-B loader on synthetic CSV files: projection, header names, gaps, glitches, slow and short pieces, windows, placement, noise statistics |
+| `tests/test_run_adsb.py` | the ADS-B evaluation: scores per method, paired verdict signs, missing-file message |
 | `.github/workflows/pages.yml` | publishes `web/` to GitHub Pages when it changes on `main` |
 | `requirements.txt` | Python dependencies (numpy, matplotlib, pytest, torch, scipy) |
-| `.gitignore` | keeps the virtual environment, caches and `outputs/` out of git |
+| `.gitignore` | keeps the virtual environment, caches, `outputs/` and `data/` out of git |
 
 ## 5. The five scenarios
 
@@ -757,6 +807,49 @@ Paired differences for the learned-gain filter (negative = it has less error):
   but here a good classical IMM beat it. A negative result: keep the idea, but do not expect it to win
   without more work (a wider training range, or learning the gain *and* the process noise).
 
+### 7.7 A real flight (`python run_adsb.py`)
+
+The sample is **one aircraft** (a Learjet from an OpenSky incident extract): 4,156 seconds of flying
+in 12 gap-free segments, which give **28 non-overlapping 120-scan windows**. Each repeat places the
+windows at new random spots near the radar and draws new radar noise; there are 10 repeats. Position
+RMSE in metres, mean +/- 95% interval over the 10 placements (the GRU and the learned-gain filter are
+the models trained on **simulated** data only, nothing was retrained on this flight):
+
+| method | normal radar (50 m, 0.005 rad) | noisy radar (150 m, 0.015 rad) |
+|---|---|---|
+| raw radar | 216.0 ± 10.9 | 648.0 ± 32.7 |
+| KF q=0.1 | 204.3 ± 10.4 | 366.4 ± 28.9 |
+| KF q=1 | 120.9 ± 6.7 | 270.2 ± 10.3 |
+| KF q=10 | 95.0 ± 2.9 | 229.6 ± 8.4 |
+| KF q=100 | 105.1 ± 4.1 | 250.5 ± 10.6 |
+| IMM | **90.8 ± 2.7** | **223.7 ± 9.3** |
+| GRU | 96.8 ± 3.7 | 244.1 ± 10.9 |
+| learned-gain filter | 116.6 ± 5.1 | 283.8 ± 13.9 |
+
+Paired differences (negative = the first has less error), normal radar then noisy radar:
+
+| comparison | normal | noisy |
+|---|---|---|
+| IMM minus best Kalman (q=10) | -4.3 ± 2.3 (IMM better) | -5.9 ± 5.5 (IMM better, barely) |
+| GRU minus best Kalman (q=10) | +1.8 ± 2.2 (no clear difference) | +14.5 ± 7.1 (Kalman better) |
+| GRU minus IMM | +6.1 ± 1.5 (IMM better) | +20.4 ± 3.9 (IMM better) |
+| learned-gain minus IMM | +25.8 ± 2.8 (IMM better) | +60.2 ± 6.3 (IMM better) |
+
+**Reading it, honestly.**
+- **The simulated ranking mostly holds.** The IMM is best again, the GRU is level with the best single
+  Kalman filter on a normal radar and a little behind it on a noisy one, and the learned-gain filter is the
+  weakest of the serious contenders. Real flying did not overturn the simulation's conclusions.
+- **The best single `q` moved from 100 to 10.** This flight (climb, cruise, gentle turns) is smoother than the
+  simulator's random maneuvers, so a calmer filter fits it better. That is a likely explanation, not a tested one.
+- **The IMM's lead over the best Kalman filter is small** (4 to 6 m) and on the noisy radar its interval almost
+  touches zero.
+- **The models were never trained on this flight**, so the GRU result is a fair test of how well simulated
+  training carries over to real motion: it carries over reasonably, without beating the classical filters.
+- **Limits.** One aircraft and about 70 minutes of flying is a sanity check, not a benchmark. The flight is the
+  same in every repeat, so the intervals show **radar luck only**, not how other flights would differ. The
+  file comes from an incident extract: it is raw sensor data and says nothing about the cause of the accident,
+  and nothing here should be read as saying anything about it. A busier, multi-aircraft file would be the next step.
+
 ## 8. Lessons learned
 
 - **A units bug hid in plain sight.** The training loss averaged the squared error over the
@@ -800,6 +893,11 @@ Paired differences for the learned-gain filter (negative = it has less error):
   structure that is provably stable (alpha-beta) and to test the whole range numerically.
 - **A plausible idea can fail its own test.** "Keep the physics and learn only the gain, so it
   generalises better" is a sensible hypothesis. The stress test said no, so the README says no.
+- **Real data answers a different question than simulation.** The ranking of trackers survived, but the
+  best `q` changed from 100 to 10 because the real flight is gentler than the invented maneuvers. A tuning
+  chosen on a simulator is a hypothesis about the real world, not a fact about it.
+- **Say what the interval does not cover.** The real-flight intervals are narrow, but they only cover
+  radar randomness, because the flight itself never changes. A narrow interval is not the same as a general result.
 - **A negative result is still a result.** "Training longer does not help" saved time and
   pointed at the real limits.
 - **Pairing, many seeds and consistency checks changed what we could claim.** The small wins
@@ -859,6 +957,12 @@ Paired differences for the learned-gain filter (negative = it has less error):
 | alpha-beta filter | a filter with one position gain (alpha) and one velocity gain (beta) per axis; stable for alpha in (0, 1) and small positive beta |
 | steady-state gain | the gain a Kalman filter settles to after many scans with the same noise |
 | generalisation | how well a method works on conditions it was not trained or tuned on |
+| ADS-B | a signal aircraft broadcast with their own GPS position, received by ground stations |
+| OpenSky Network | a volunteer network that records ADS-B and shares the data for research |
+| icao24 | the unique 24-bit address that identifies one aircraft in the signal |
+| equirectangular projection | a simple map projection: metres north = latitude difference, metres east = longitude difference times the cosine of the latitude |
+| resampling | computing values on a regular time grid (here 1 s) from irregular reports, by interpolation |
+| segment | an unbroken stretch of a flight, with no gap longer than 5 seconds |
 | OSPA | a distance between a set of true positions and a set of tracks, counting wrong positions and the wrong count |
 | localisation / cardinality | the two parts of OSPA: how far paired tracks are off, and the cost of the wrong number of tracks |
 
@@ -1085,6 +1189,37 @@ It lost to the IMM and the GRU in every scenario, and on a radar noisier than an
 the plain q=100 Kalman filter. The hope that learning only the gain would generalise better was not supported.
 </details>
 
+<details><summary><b>36.</b> The aircraft's own ADS-B position is already very accurate. Why add radar noise to it?</summary>
+
+We want to test trackers on what a radar sees, not on GPS. The real flight is the truth (real, human-flown
+maneuvers) and the simulated radar adds range and bearing noise and missed plots. Only the flying is real.
+</details>
+
+<details><summary><b>37.</b> Why is a flight cut wherever two reports are more than 5 seconds apart?</summary>
+
+Interpolating across a long gap would draw a straight line the aircraft may not have flown, inventing
+truth. Cutting there keeps every resampled point within a few seconds of a real report. Pieces that are too
+short (under 120 s) or too slow (taxiing) are dropped for the same reason of keeping real flying only.
+</details>
+
+<details><summary><b>38.</b> The intervals in section 7.7 are narrow. Does that mean the result holds for other flights?</summary>
+
+No. The flight is identical in every repeat, so the interval only measures radar luck (placement and noise).
+It says nothing about how a different aircraft would behave. That needs more flights.
+</details>
+
+<details><summary><b>39.</b> Why might q=10 beat q=100 on the real flight when q=100 won in the simulation?</summary>
+
+The simulator's random maneuvers include sudden accelerations and turns, so a large q (an agile filter) fits.
+The real flight climbs, cruises and turns gently, so a calmer filter averages the noise better. This is a
+likely reason, not a tested one.
+</details>
+
+<details><summary><b>40.</b> What is the distance in metres of one degree of longitude at 30 degrees north, using a mean Earth radius of 6,371 km?</summary>
+
+One degree of latitude is 111,195 m. One degree of longitude is that times cos(30 degrees) = 0.866, about 96,300 m.
+</details>
+
 ## 11. Roadmap and further reading
 
 **Where the project could go next** (the IMM filter, multi-target tracking and the learned gain are done, see sections 3.7, 3.8, 3.9 and 7)
@@ -1092,8 +1227,8 @@ the plain q=100 Kalman filter. The hope that learning only the gain would genera
   track-to-track swaps scored explicitly.
 - **A better learned gain:** the first version (section 3.9) did not generalise (section 7.6). Ideas:
   train on a wider noise range, also learn the process noise, or give it the IMM's mode probabilities.
-- **Real flight data:** ADS-B tracks (for example from the OpenSky Network) with simulated radar
-  noise added, in place of invented maneuvers.
+- **More real data:** many aircraft at once (to test the multi-target tracker on real traffic), and real radar
+  plots instead of ADS-B plus simulated noise. The single-flight result in section 7.7 is only a first check.
 - **Notebooks only for exploring:** keep the code in the `tracker/` package and its tests, and use
   notebooks that import it for plots and experiments.
 
@@ -1105,6 +1240,8 @@ the plain q=100 Kalman filter. The hope that learning only the gain would genera
 - Tracking theory: Bar-Shalom, Li and Kirubarajan, *Estimation with Applications to Tracking and
   Navigation* (covers NEES, NIS, IMM and data association).
 - Statistics: any introduction to confidence intervals and paired t-tests.
+- Data: Schaefer, Strohmeier, Lenders, Martinovic and Wilhelm (2014), *Bringing up OpenSky: a large-scale
+  ADS-B sensor network for research*, and https://opensky-network.org (data under CC BY 4.0).
 
 ## 12. Status
 
@@ -1116,4 +1253,4 @@ the plain q=100 Kalman filter. The hope that learning only the gain would genera
 - [x] IMM filter as a stronger classical baseline (it beat the GRU in every scenario)
 - [x] Multi-target tracking with clutter (gating, Hungarian assignment, M-of-N track management, OSPA)
 - [x] KalmanNet-style learned gain (works, beats a single Kalman filter in 4 of 5 scenarios, but loses to the IMM and the GRU and did not generalise better)
-- [ ] Real ADS-B flight data
+- [x] Real ADS-B flight data (loader, evaluation and a first result on one real flight; the IMM is still best)
