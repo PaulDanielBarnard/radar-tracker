@@ -87,11 +87,24 @@
   .row.best .val { color: var(--ink); font-weight: 700; }
   .note { color: var(--muted); font-size: 0.85rem; margin-top: 10px; }
 
+  .learn-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; margin-top: 4px; }
+  .learn-grid > div { min-width: 0; }
+  #l-radar { height: 300px; }
+  #l-loss { height: 300px; }
+  .legend.small { margin: 8px 0 0; gap: 4px 14px; font-size: 0.85rem; color: var(--muted); }
+  .legend.small span { display: inline-flex; align-items: center; gap: 6px; }
+  #l-bars { margin-top: 14px; gap: 14px; }
+  #l-bars .group { cursor: pointer; }
+  .row .fill.ghost { opacity: 0.45; }
   .topbar { display: flex; justify-content: space-between; align-items: flex-start; gap: 12px; }
   noscript { color: var(--plots); }
   @media (max-width: 560px) {
     #main { height: 320px; }
     .row { grid-template-columns: 70px 1fr 60px; }
+  }
+  @media (max-width: 720px) {
+    .learn-grid { grid-template-columns: 1fr; }
+    #l-radar, #l-loss { height: 250px; }
   }
 </style>
 </head>
@@ -148,9 +161,41 @@
     <div class="bars" id="bars"></div>
     <p class="note">Bars are capped at 700 m. A Kalman filter tuned for straight flight (q=0.1) is far worse than the raw radar in turns, which is why one fixed setting never wins everywhere. The GRU never saw these tracks during training.</p>
   </section>
+
+  <section class="panel" id="learn" aria-labelledby="learn-h" hidden>
+    <h2 id="learn-h">How the GRU learns</h2>
+    <p class="sub">A recorded training run, replayed. At epoch 0 the network is untrained and only gives its starting guess. Each epoch it sees more tracks and adjusts. Drag the slider or press play and watch the green line move toward the true path.</p>
+    <div class="tabs" role="tablist" aria-label="Scenario to replay" id="l-tabs"></div>
+
+    <div class="learn-grid">
+      <div>
+        <canvas id="l-radar" role="img" aria-label="Top-down view of one demo track: the true path, the noisy plots, the untrained starting guess and the GRU estimate at the chosen epoch"></canvas>
+        <div class="legend small" id="l-legend"></div>
+      </div>
+      <div>
+        <canvas id="l-loss" role="img" aria-label="Training and validation loss per epoch with a marker at the chosen epoch"></canvas>
+        <div class="legend small" id="l-loss-legend"></div>
+      </div>
+    </div>
+
+    <div class="controls">
+      <button id="l-play" type="button">Play training</button>
+      <input id="l-epoch" type="range" min="0" max="0" value="0" aria-label="Training epoch">
+      <span id="l-label" class="sub" style="margin:0;min-width:11ch"></span>
+      <label class="sub" style="margin:0">Speed
+        <select id="l-speed" aria-label="Replay speed">
+          <option value="2">Slow</option><option value="5" selected>Normal</option><option value="12">Fast</option>
+        </select>
+      </label>
+    </div>
+    <p class="verdict" id="l-verdict" aria-live="polite"></p>
+    <div class="bars" id="l-bars"></div>
+    <p class="note" id="l-note"></p>
+  </section>
 </div>
 
 <script src="data.js"></script>
+<script src="training.js"></script>
 <script>
 "use strict";
 (() => {
@@ -525,6 +570,213 @@
   matchMedia("(prefers-color-scheme: dark)").addEventListener("change", draw);
 
   buildTabs(); buildLegend(); buildBars(); selectScenario(0); setView("ppi");
+  requestAnimationFrame((t) => { last = t; frame(t); });
+})();
+</script>
+<script>
+"use strict";
+// "How the GRU learns": replays a recorded training run (web/training.js).
+// If that file is missing the panel simply stays hidden and the rest of the page is unaffected.
+(() => {
+  const T = window.TRAINING;
+  const panel = document.getElementById("learn");
+  if (!panel || !T || !T.epochs || !T.epochs.length) return;
+  panel.hidden = false;
+
+  const $ = (id) => document.getElementById(id);
+  const css = (name) => getComputedStyle(document.documentElement).getPropertyValue(name).trim();
+  const reduceMotion = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+  const NICE = { straight: "Straight", turning: "Turning", maneuvers: "Maneuvers", noisy: "Noisy radar", missed_30: "30% missed scans" };
+  const N = T.nEpochs;
+  const S = { scn: Math.max(T.scenarios.indexOf("turning"), 0), ep: 0, playing: false, speed: 5, acc: 0 };
+  let last = 0;
+
+  const name = () => T.scenarios[S.scn];
+  const epochData = (e) => T.epochs[Math.min(Math.max(e, 0), T.epochs.length - 1)];
+
+  function fit(canvas) {
+    const dpr = window.devicePixelRatio || 1;
+    const w = canvas.clientWidth, h = canvas.clientHeight;
+    if (canvas.width !== Math.round(w * dpr) || canvas.height !== Math.round(h * dpr)) {
+      canvas.width = Math.round(w * dpr); canvas.height = Math.round(h * dpr);
+    }
+    const ctx = canvas.getContext("2d");
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    return { ctx, w, h };
+  }
+
+  // ---- mini radar: truth, plots, the starting guess and the GRU at the chosen epoch ----
+  function drawRadar() {
+    const { ctx, w, h } = fit($("l-radar"));
+    ctx.clearRect(0, 0, w, h);
+    const d = T.demo[name()], est = epochData(S.ep).est[name()], first = T.epochs[0].est[name()];
+    let x0 = Infinity, x1 = -Infinity, y0 = Infinity, y1 = -Infinity;
+    for (const arr of [d.truth, d.meas, d.base]) for (const p of arr) {
+      if (!p) continue;
+      x0 = Math.min(x0, p[0]); x1 = Math.max(x1, p[0]); y0 = Math.min(y0, p[1]); y1 = Math.max(y1, p[1]);
+    }
+    const pad = 26, s = Math.min((w - 2 * pad) / Math.max(x1 - x0, 1), (h - 2 * pad) / Math.max(y1 - y0, 1));
+    const cx = (x0 + x1) / 2, cy = (y0 + y1) / 2;
+    const X = (p) => w / 2 + (p[0] - cx) * s, Y = (p) => h / 2 - (p[1] - cy) * s;
+    const line = (pts, color, lw, dash, alpha) => {
+      ctx.strokeStyle = color; ctx.lineWidth = lw; ctx.globalAlpha = alpha; ctx.setLineDash(dash);
+      ctx.beginPath(); pts.forEach((p, k) => (k ? ctx.lineTo(X(p), Y(p)) : ctx.moveTo(X(p), Y(p)))); ctx.stroke();
+      ctx.setLineDash([]); ctx.globalAlpha = 1;
+    };
+    ctx.lineJoin = "round"; ctx.lineCap = "round";
+    ctx.fillStyle = css("--plots"); ctx.globalAlpha = 0.7;
+    for (const p of d.meas) if (p) { ctx.beginPath(); ctx.arc(X(p), Y(p), 2.4, 0, 7); ctx.fill(); }
+    ctx.globalAlpha = 1;
+    line(d.truth, css("--truth"), 1.8, [], 0.9);
+    if (S.ep > 0) line(first, css("--raw"), 1.4, [4, 4], 0.9);   // where training started
+    line(est, css("--gru"), 2.4, [], 1);
+    const end = est[est.length - 1];
+    ctx.fillStyle = css("--gru"); ctx.beginPath(); ctx.arc(X(end), Y(end), 4.5, 0, 7); ctx.fill();
+
+    // scale bar
+    const steps = [100, 200, 500, 1000, 2000, 5000, 10000], target = (w * 0.22) / s;
+    const len = steps.filter((m) => m <= target).pop() || 100, px = len * s;
+    ctx.strokeStyle = css("--muted"); ctx.fillStyle = css("--muted"); ctx.lineWidth = 2;
+    ctx.beginPath(); ctx.moveTo(w - 14 - px, h - 14); ctx.lineTo(w - 14, h - 14); ctx.stroke();
+    ctx.font = "12px system-ui, sans-serif"; ctx.textAlign = "right";
+    ctx.fillText(len >= 1000 ? `${len / 1000} km` : `${len} m`, w - 14, h - 20);
+    ctx.textAlign = "left"; ctx.fillText(`epoch ${S.ep}`, 12, 20);
+  }
+
+  // ---- loss chart: training and validation loss per epoch, a cursor at the chosen epoch ----
+  function drawLoss() {
+    const { ctx, w, h } = fit($("l-loss"));
+    ctx.clearRect(0, 0, w, h);
+    const tr = T.epochs.map((e) => e.trainLoss), va = T.epochs.map((e) => e.valLoss);
+    const all = tr.concat(va).filter((v) => v !== null && isFinite(v));
+    let lo = Math.min(...all), hi = Math.max(...all);
+    const padv = (hi - lo) * 0.08 || 0.01; lo -= padv; hi += padv;
+    const L = 46, R = 10, Tp = 10, B = 26, pw = w - L - R, ph = h - Tp - B;
+    const X = (e) => L + (N ? (e / N) * pw : 0), Y = (v) => Tp + ph - ((v - lo) / (hi - lo)) * ph;
+    ctx.strokeStyle = css("--line"); ctx.fillStyle = css("--muted"); ctx.lineWidth = 1;
+    ctx.font = "11px system-ui, sans-serif"; ctx.textAlign = "right";
+    for (const f of [0, 0.5, 1]) {
+      const v = lo + (hi - lo) * f, y = Y(v);
+      ctx.beginPath(); ctx.moveTo(L, y); ctx.lineTo(w - R, y); ctx.stroke(); ctx.fillText(v.toFixed(3), L - 6, y + 4);
+    }
+    ctx.textAlign = "center"; ctx.fillText("epoch", L + pw / 2, h - 4);
+    ctx.textAlign = "left"; ctx.fillText("0", L, h - 4);
+    ctx.textAlign = "right"; ctx.fillText(String(N), w - R, h - 4);
+
+    const series = [[va, css("--kf"), 2], [tr, css("--gru"), 2]];
+    ctx.lineJoin = "round";
+    for (const [vals, color, lw] of series) {
+      ctx.strokeStyle = color; ctx.lineWidth = lw; ctx.beginPath();
+      let started = false;
+      vals.forEach((v, e) => { if (v === null) return; const x = X(e), y = Y(v); started ? ctx.lineTo(x, y) : ctx.moveTo(x, y); started = true; });
+      ctx.stroke();
+      ctx.fillStyle = color;
+      vals.forEach((v, e) => { if (v !== null && e <= S.ep) { ctx.beginPath(); ctx.arc(X(e), Y(v), e === S.ep ? 4.5 : 2, 0, 7); ctx.fill(); } });
+    }
+    if (T.bestEpoch !== null && T.bestEpoch !== undefined) {   // the epoch whose weights were kept
+      const x = X(T.bestEpoch);
+      ctx.strokeStyle = css("--muted"); ctx.lineWidth = 1; ctx.setLineDash([3, 4]);
+      ctx.beginPath(); ctx.moveTo(x, Tp); ctx.lineTo(x, Tp + ph); ctx.stroke(); ctx.setLineDash([]);
+      ctx.fillStyle = css("--muted"); ctx.textAlign = x > w / 2 ? "right" : "left";
+      ctx.fillText("best saved", x + (x > w / 2 ? -4 : 4), Tp + 11);
+    }
+    ctx.strokeStyle = css("--ink"); ctx.lineWidth = 1.2;
+    ctx.beginPath(); ctx.moveTo(X(S.ep), Tp); ctx.lineTo(X(S.ep), Tp + ph); ctx.stroke();
+  }
+
+  // ---- per-scenario bars: raw radar, best Kalman, and the GRU at this epoch ----
+  const CAP = Math.ceil(Math.max(...T.scenarios.map((n) => Math.max(T.ref[n].raw, T.epochs[0].rmse[n]))) / 100) * 100;
+  const ROWS = [["raw", "--raw"], ["kf", "--kf"], ["gru", "--gru"]];
+
+  // built once (so keyboard focus survives), then only the widths and numbers change
+  function buildBars() {
+    $("l-bars").innerHTML = T.scenarios.map((n, i) =>
+      `<div class="group" data-i="${i}" tabindex="0" role="button" aria-label="Show ${NICE[n] || n}"><h3>${NICE[n] || n}</h3>` +
+      ROWS.map(([key, c]) => `<div class="row" data-k="${key}"><span class="lab"></span>
+        <span class="track"><span class="fill" style="display:block;background:var(${c})"></span></span>
+        <span class="val"></span></div>`).join("") + `</div>`).join("");
+    document.querySelectorAll("#l-bars .group").forEach((g) => {
+      const go = () => selectScenario(+g.dataset.i);
+      g.addEventListener("click", go);
+      g.addEventListener("keydown", (ev) => { if (ev.key === "Enter" || ev.key === " ") { ev.preventDefault(); go(); } });
+    });
+  }
+
+  function updateBars() {
+    const e = epochData(S.ep);
+    document.querySelectorAll("#l-bars .group").forEach((g, i) => {
+      const n = T.scenarios[i], ref = T.ref[n];
+      const vals = { raw: ["Raw radar", ref.raw], kf: [`Kalman q=${ref.bestKf.q}`, ref.bestKf.rmse], gru: ["GRU", e.rmse[n]] };
+      const min = Math.min(...Object.values(vals).map((v) => v[1]));
+      g.classList.toggle("current", i === S.scn);
+      g.querySelectorAll(".row").forEach((row) => {
+        const [label, v] = vals[row.dataset.k];
+        row.classList.toggle("best", v === min);
+        row.querySelector(".lab").textContent = label;
+        row.querySelector(".fill").style.width = Math.min(v / CAP, 1) * 100 + "%";
+        row.querySelector(".val").textContent = `${Math.round(v)} m${v === min ? " ★" : ""}`;
+      });
+    });
+  }
+
+  function updateText() {
+    const e = epochData(S.ep), n = name(), ref = T.ref[n], g = e.rmse[n], k = ref.bestKf.rmse;
+    $("l-label").textContent = `epoch ${S.ep} / ${N}`;
+    const sl = $("l-epoch"); sl.value = S.ep;
+    sl.setAttribute("aria-valuetext", `epoch ${S.ep} of ${N}, GRU error ${Math.round(g)} metres`);
+    const state = S.ep === 0 ? "Untrained: the network only outputs its starting guess." :
+      e.saved ? "This epoch had the best validation loss so far, so its weights were saved." : "Weights are still being adjusted.";
+    const cmp = Math.round(g) === Math.round(k) ? `That is level with the best Kalman filter (q=${ref.bestKf.q}, ${Math.round(k)} m).`
+              : g < k ? `The GRU is now ahead of the best Kalman filter (${Math.round(k)} m).`
+              : `The best Kalman filter (q=${ref.bestKf.q}) is still ahead at ${Math.round(k)} m.`;
+    $("l-verdict").innerHTML = `<strong>${NICE[n] || n}, epoch ${S.ep}:</strong> the GRU's average error is <strong>${Math.round(g)} m</strong> ` +
+      `(raw radar ${Math.round(ref.raw)} m). ${cmp} ${state}`;
+  }
+
+  function draw() { drawRadar(); drawLoss(); updateBars(); updateText(); }
+
+  function setEpoch(e) { S.ep = Math.min(Math.max(Math.round(e), 0), N); draw(); }
+  function setPlaying(on) { S.playing = on; $("l-play").textContent = on ? "Pause" : (S.ep >= N ? "Replay" : "Play training"); }
+
+  function selectScenario(i) {
+    S.scn = i;
+    document.querySelectorAll("#l-tabs button").forEach((b) => b.setAttribute("aria-selected", +b.dataset.i === i));
+    draw();
+  }
+
+  function frame(now) {
+    const dt = Math.min((now - last) / 1000, 0.1); last = now;
+    if (S.playing) {
+      S.acc += dt * S.speed;
+      while (S.acc >= 1 && S.ep < N) { S.acc -= 1; S.ep += 1; }
+      draw();
+      if (S.ep >= N) setPlaying(false);
+    }
+    requestAnimationFrame(frame);
+  }
+
+  // setup
+  $("l-tabs").innerHTML = T.scenarios.map((n, i) => `<button type="button" role="tab" data-i="${i}" aria-selected="${i === S.scn}">${NICE[n] || n}</button>`).join("");
+  document.querySelectorAll("#l-tabs button").forEach((b) => b.addEventListener("click", () => selectScenario(+b.dataset.i)));
+  const sw = (c, t) => `<span><i class="sw" style="background:var(${c})"></i>${t}</span>`;
+  $("l-legend").innerHTML = sw("--truth", "True path") + sw("--plots", "Radar plots") + sw("--raw", "Starting guess (epoch 0)") + sw("--gru", "GRU now");
+  $("l-loss-legend").innerHTML = sw("--gru", "Training loss") + sw("--kf", "Validation loss (unseen tracks)");
+  buildBars();
+  $("l-epoch").max = N;
+  $("l-epoch").addEventListener("input", (ev) => { setEpoch(+ev.target.value); setPlaying(false); });
+  $("l-play").addEventListener("click", () => {
+    if (S.playing) { setPlaying(false); return; }
+    if (S.ep >= N) setEpoch(0);
+    S.acc = 0; setPlaying(true);
+  });
+  $("l-speed").addEventListener("change", (ev) => { S.speed = +ev.target.value; });
+  $("l-note").textContent = `Recorded run: ${N} epochs. Loss is measured on tracks the network is not trained on (validation); the dashed line marks the epoch whose weights were kept. Bars use the same validation tracks for every method. ` +
+    (reduceMotion ? "Animation is off because your system asks for reduced motion; use the slider." : "");
+  $("theme").addEventListener("click", draw);
+  window.addEventListener("resize", draw);
+  matchMedia("(prefers-color-scheme: dark)").addEventListener("change", draw);
+  setPlaying(false);
+  draw();
   requestAnimationFrame((t) => { last = t; frame(t); });
 })();
 </script>

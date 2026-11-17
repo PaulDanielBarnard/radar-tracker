@@ -5,6 +5,7 @@ filter), randomised radar settings, hidden size 128, two layers, 50 epochs. Use
 `--no-hybrid --no-randomize --hidden 64 --layers 1 --epochs 30` for the small plain model.
 """
 import argparse
+import json
 
 import numpy as np
 import torch
@@ -73,6 +74,69 @@ def report_by_scenario(model, val_sets):
             print(f"{name:<12}{rmse_m(base, truth):>11.1f}{rmse_m(model(feats, base), truth):>10.1f}")
 
 
+DEMO_SEED = 42      # the test seed the web demo uses; its first track per scenario is replayed
+
+
+def _pts(a):
+    """(T, 2) array -> JSON-friendly list, rounded to 0.1 m, NaN (a missed scan) -> None."""
+    return [None if np.isnan(x) else [round(float(x), 1), round(float(y), 1)] for x, y in a]
+
+
+class TrainingRecorder:
+    """Records how training progresses so the web demo can replay it.
+
+    Epoch 0 is the untrained model (which equals its base position). After that, one entry per
+    epoch: the losses, the validation RMSE per scenario, and the model's estimates on one fixed
+    demo track per scenario (the first track of simulate_batch(..., seed=42), the same track the
+    demo page already shows).
+    """
+
+    def __init__(self, hybrid: bool, args=None):
+        self.hybrid = hybrid
+        self.args = {} if args is None else {k: v for k, v in vars(args).items() if k != "record"}
+        self.names = list(SCENARIOS)
+        self.tracks = [simulate_batch(1, mode, radar, TARGET, seed = DEMO_SEED)[0]
+                       for mode, radar in SCENARIOS.values()]
+        self.feats, self.base, self.truth = tracks_to_tensors(self.tracks, hybrid)
+        self.epochs = []
+
+    def snapshot(self, model, epoch, train_loss, val, val_sets, saved):
+        feats, base, truth, scale = val
+        was_training = model.training
+        model.eval()
+        with torch.no_grad():
+            pred = model(feats, base)
+            demo = model(self.feats, self.base)
+            per_scenario = {name: rmse_m(model(f, b), t) for name, (f, b, t, _) in val_sets.items()}
+            entry = {
+                "epoch": epoch,
+                "train_loss": None if train_loss is None else round(float(train_loss), 4),
+                "val_loss": round(settled_loss(pred, truth, scale).item(), 4),
+                "val_rmse": round(rmse_m(pred, truth), 1),
+                "saved": bool(saved),
+                "scenarios": {k: round(float(v), 1) for k, v in per_scenario.items()},
+                "estimates": {name: _pts(demo[i].numpy()) for i, name in enumerate(self.names)},
+            }
+        model.train(was_training)
+        self.epochs.append(entry)
+
+    def to_dict(self):
+        best = max((e for e in self.epochs if e["saved"]), key = lambda e: e["epoch"], default = None)
+        return {
+            "args": self.args,
+            "scenarios": self.names,
+            "demo": {name: {"truth": _pts(t.truth[:, :2]), "meas": _pts(t.meas_xy),
+                            "base": _pts(self.base[i].numpy())}
+                     for i, (name, t) in enumerate(zip(self.names, self.tracks))},
+            "best_epoch": None if best is None else best["epoch"],
+            "epochs": self.epochs,
+        }
+
+    def save(self, path):
+        with open(path, "w", encoding = "utf-8") as f:
+            json.dump(self.to_dict(), f, separators = (",", ":"))
+
+
 def build_parser() -> argparse.ArgumentParser:
     """The command-line options (separate from main so tests can check the defaults)."""
     ap = argparse.ArgumentParser(description = "Train the GRU tracker. With no options it trains the "
@@ -90,6 +154,8 @@ def build_parser() -> argparse.ArgumentParser:
     ap.add_argument("--randomize", action = argparse.BooleanOptionalAction, default = True,
                     help = "train on random radar settings (default on; --no-randomize uses the five fixed scenarios)")
     ap.add_argument("--name", default = "gru_tracker", help = "checkpoint name in outputs/")
+    ap.add_argument("--record", default = None, metavar = "PATH",
+                    help = "also write a JSON recording of the training run (for the web demo's replay)")
     return ap
 
 
@@ -118,6 +184,10 @@ def main(argv = None):
     # halve the learning rate whenever validation stops improving for a few epochs
     sched = torch.optim.lr_scheduler.ReduceLROnPlateau(opt, mode = "min", factor = 0.5, patience = 3)
     best, stale = float("inf"), 0
+
+    recorder = TrainingRecorder(args.hybrid, args) if args.record else None
+    if recorder:
+        recorder.snapshot(model, 0, None, (val_feats, val_base, val_truth, val_scale), val_sets, saved = False)
 
     for epoch in range(1, args.epochs + 1):
         model.train()
@@ -150,6 +220,10 @@ def main(argv = None):
         else:
             stale += 1
 
+        if recorder:
+            recorder.snapshot(model, epoch, train_loss, (val_feats, val_base, val_truth, val_scale),
+                              val_sets, saved = bool(marker))
+
         print(f"epoch {epoch:3d}  train loss {train_loss:6.3f}   val loss {val_loss:6.3f}"
               f"   val RMSE {val_rmse:7.1f} m"
               f"   lr {opt.param_groups[0]['lr']:.0e}{marker}")
@@ -159,6 +233,9 @@ def main(argv = None):
 
     model = load_model(ckpt)   # reload the best epoch
     report_by_scenario(model, val_sets)
+    if recorder:
+        recorder.save(args.record)
+        print(f"\nRecorded {len(recorder.epochs)} snapshots (epoch 0 to {recorder.epochs[-1]['epoch']}) in {args.record}")
 
 
 if __name__ == "__main__":
