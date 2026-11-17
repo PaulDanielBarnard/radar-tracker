@@ -33,6 +33,30 @@ check(`hybrid base position matches Python (max diff ${db.toExponential(2)} m)`,
 check("plain features are the first 11 columns", Lab.trackFeatures(track, false).feats[5].every((v, j) => Math.abs(v - V.features[5][j]) < 1e-4));
 check("the track really has missed scans (the test covers them)", V.detected.some((d) => !d));
 
+// ---- the IMM filter and the GRU that is fed the IMM ----
+if (Lab.immRun) {
+  const imm = Lab.immRun(track), di = maxDiff(imm.est, V.imm), dm = maxDiff(imm.mu, V.immMu);
+  check(`IMM estimates match Python (max diff ${di.toExponential(2)} m)`, di < 0.05, di);
+  check(`IMM mode probabilities match Python (max diff ${dm.toExponential(2)})`, dm < 1e-4, dm);
+  check("IMM mode probabilities sum to 1 on every scan", imm.mu.every((row) => Math.abs(row.reduce((a, b) => a + b, 0) - 1) < 1e-9));
+  const fi = Lab.trackFeatures(track, "imm"), dfi = maxDiff(fi.feats, V.featuresImm), dbi = maxDiff(fi.base, V.baseImm);
+  check(`27 IMM-input features match Python (max diff ${dfi.toExponential(2)})`, fi.feats[0].length === 27 && dfi < 1e-4, dfi);
+  check(`IMM base position matches Python (max diff ${dbi.toExponential(2)} m)`, dbi < 0.05, dbi);
+  if (Lab.gruRun) {
+    const out = Lab.gruRun(V.modelImm, track), dg = maxDiff(out, V.gruImm);
+    check(`GRU fed the IMM matches Python (max diff ${dg.toExponential(2)} m)`, dg < 0.05, dg);
+    check("the IMM-fed test output differs from its base (not vacuous)", Math.max(...out.map((p, k) => Math.hypot(p[0] - fi.base[k][0], p[1] - fi.base[k][1]))) > 5);
+  }
+}
+
+// ---- the learned-gain filter ----
+if (Lab.knetRun) {
+  const kn = Lab.knetRun(V.knetModel, track), dk = maxDiff(kn, V.knet);
+  check(`KalmanNet matches Python (max diff ${dk.toExponential(2)} m)`, dk < 0.05, dk);
+  const plain = Lab.kalmanRun(track, 100), spread = Math.max(...kn.map((e, k) => Math.hypot(e[0] - plain[k][0], e[1] - plain[k][1])));
+  check("the KalmanNet test output differs from a fixed-gain filter (not vacuous)", spread > 5, spread);
+}
+
 // ---- the trained GRU: only if lab.js has the GRU (added in a later step) ----
 if (Lab.gruForward) {
   const out = Lab.gruForward(V.model, feats, base);
