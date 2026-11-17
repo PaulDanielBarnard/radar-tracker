@@ -77,6 +77,14 @@ def simulate_track(rng, mode: str = "random",
                    radar: RadarConfig = RadarConfig(),
                    target: TargetConfig = TargetConfig()) -> Track:
     truth = _simulate_truth(rng, target, radar.dt, mode)
+    return track_from_truth(rng, truth, radar)
+
+
+def track_from_truth(rng, truth: np.ndarray, radar: RadarConfig = RadarConfig()) -> Track:
+    """Add the radar to a given truth (T, 4): range/bearing noise and missed detections.
+
+    Used for simulated truth and for real flights alike.
+    """
     x, y = truth[:, 0], truth[:, 1]
     r_true = np.hypot(x, y)
     th_true = np.arctan2(y, x)
