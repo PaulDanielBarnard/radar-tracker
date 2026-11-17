@@ -51,9 +51,10 @@ python -m pytest                       # all tests should pass
 | Command | What it does | Takes |
 |---|---|---|
 | `python run_baseline.py` | Kalman filters (4 settings) vs raw radar on every scenario; saves plots to `outputs/` | seconds |
-| `python train_neural.py --hybrid --randomize --hidden 128 --layers 2 --epochs 50` | trains the GRU and saves `outputs/gru_tracker.pt` | about 5 minutes on a laptop CPU |
+| `python train_neural.py` | trains the recommended GRU (hybrid, randomised radar, hidden 128, 2 layers, 50 epochs) and saves `outputs/gru_tracker.pt` | about 5 minutes on a laptop CPU |
 | `python run_compare.py` | one table: raw radar vs Kalman vs IMM vs GRU (needs the trained model) | a few minutes |
 | `python run_eval.py` | the same comparison over 10 random seeds with confidence intervals and a filter-consistency check | about 30 minutes (`--seeds 2 --tracks 30` for a quick look) |
+| `python run_multitarget.py` | the multi-target tracker on 1, 3 and 6 aircraft among 0, 5 and 20 false plots per scan, scored with OSPA | about 6 minutes (`--scenes 2` for a quick look) |
 | `python export_demo.py` | bakes example tracks and results into `web/data.js` | a minute or two |
 | `python -m http.server 8000 -d web` | serves the demo page at http://localhost:8000 | instant |
 
@@ -62,7 +63,9 @@ Notes:
   (see `.gitignore`), so a fresh clone must run `train_neural.py` before `run_compare.py`,
   `run_eval.py` or `export_demo.py`.
 - Run commands from the project root, the folder that contains `run_baseline.py`.
-- `train_neural.py --help` lists every option (epochs, model size, learning rate, ...).
+- `train_neural.py --help` lists every option (epochs, model size, learning rate, ...). The bare
+  command trains the recommended model; `--no-hybrid --no-randomize --hidden 64 --layers 1
+  --epochs 30` gives the small plain model used in the early experiments.
   Use `--name` to save several models side by side and `--model` on the other scripts
   to pick one.
 
@@ -232,14 +235,14 @@ estimate = base position + correction        (correction = network output x 1000
 The output layer starts at **exactly zero**, so an untrained model returns the base
 position unchanged (a test checks this). Training can then only improve on the base.
 
-**Hybrid mode (`--hybrid`).** Normally the base is the latest raw plot. In hybrid mode the
+**Hybrid mode (on by default; `--no-hybrid` turns it off).** Without it the base is the latest raw plot. In hybrid mode the
 base is a Kalman filter's position (q = 100), and the network also sees the estimates of
 two Kalman filters (q = 0.1 and q = 100) as extra inputs. It starts at Kalman quality and
 learns where to deviate. This is the best-performing configuration.
 
 **How it learns** (`train_neural.py`):
-- *Training data:* 2000 simulated tracks. Normally 400 per scenario; with `--randomize`
-  every track gets its own random noise level and miss rate, so the model learns the
+- *Training data:* 2000 simulated tracks. Normally 400 per scenario; with randomisation
+  (the default; `--no-randomize` turns it off) every track gets its own random noise level and miss rate, so the model learns the
   general skill instead of five fixed cases.
 - *Loss:* the average squared distance error, but each track's error is divided by that
   track's **expected raw radar error** (about 182 m for the normal radar, 546 m for the
@@ -325,6 +328,76 @@ simulator. Real trackers also know their aircraft's turn limits, but the compari
 GRU, which had to learn everything from examples, is not tilt-free. And the IMM still loses to
 a very calm Kalman filter on straight flight (section 7.1).
 
+### 3.8 Several aircraft and false alarms (`tracker/scene.py`, `association.py`, `multitarget.py`, `ospa.py`)
+
+**The new problem.** Until now the radar saw one aircraft and every plot was that aircraft. With
+several aircraft the radar returns a **pile of plots in no particular order**: some come from
+aircraft, some are **false alarms** (also called **clutter**: noise, birds, weather). The tracker
+must work out which plot belongs to which aircraft *before* it can filter anything. This is
+**data association**. (`tracker/scene.py` simulates it: each scan has the detected aircraft plus a
+random number of false plots, on average `clutter_rate`, spread evenly over the radar's disc. Each
+plot secretly carries its true source, used only for scoring, never by the tracker.)
+
+**The pipeline.** Every scan, `MultiTargetTracker` (`tracker/multitarget.py`) does five things:
+
+```
+1. PREDICT    every existing track moves forward one scan (the normal Kalman predict)
+2. ASSOCIATE  gating + Hungarian assignment decide which plot belongs to which track
+3. UPDATE     a matched track is corrected by its plot; an unmatched track coasts (a miss)
+4. INITIATE   a plot nobody claimed starts a new TENTATIVE track
+5. MANAGE     tentative -> confirmed after M hits in N scans; drop weak or lost tracks
+```
+
+**Gating.** A plot is only a candidate for a track if it is statistically close to where the
+track expects it. "Close" is measured in standard deviations by the **squared Mahalanobis
+distance** `d^2 = y^T S^-1 y` (the same quantity as NIS: the innovation `y` against its
+covariance `S`). If the plot really belongs to the track, `d^2` follows a chi-squared
+distribution with 2 degrees of freedom, so 99% of true plots have `d^2` under **9.21**. That is
+the gate (`GATE_99`). Example: a track predicts (0, 0) with sigma 20 m in each direction
+(`S` = 400 on the diagonal). A plot 30 m away has `d^2` = 2.25, inside the gate. A plot 70 m
+away has `d^2` = 12.25, outside it.
+
+**Assignment.** Within the gates, each track gets at most one plot and each plot at most one
+track. Letting every track grab its nearest plot (**greedy**) can force a terrible pairing
+later. The **Hungarian algorithm** instead finds the pairing with the smallest *total* cost.
+A tiny example (cost = `d^2`, rows are tracks, columns are plots; checked by running the code):
+
+| | plot 0 | plot 1 |
+|---|---|---|
+| track 0 | 1 | 2 |
+| track 1 | 2 | 8 |
+
+Greedy takes the cheapest pair first (track 0 with plot 0, cost 1) and is left with track 1 and
+plot 1 at cost 8: **total 9**. Hungarian pairs track 0 with plot 1 and track 1 with plot 0:
+2 + 2 = **total 4**.
+
+**Track management.** One false plot is enough to start a tentative track, so a track is
+reported only after it is **confirmed**: M hits within N scans (default 3 of 5). A tentative
+track that can no longer reach 3 hits in 5 is dropped. Clutter almost never hits three scans
+in five in a row, so it stays out of the answer. A confirmed track that misses 5 scans in a row
+is dropped, which is how a target that leaves is forgotten. Two details the tests exposed:
+a plot already inside an existing track's gate is never used to start a new track, and two
+tracks whose position *and* velocity agree are merged (an unlucky plot just outside the gate
+used to spawn a lasting duplicate of the same aircraft; comparing velocity too keeps two
+different aircraft that merely cross apart).
+
+**Scoring several tracks: OSPA (`tracker/ospa.py`).** RMSE needs one track per aircraft in a
+known order. With sets of different sizes and no order you need a distance between *sets*.
+**OSPA** pairs truths and tracks one-to-one as well as possible, caps each pair's distance at a
+cutoff `c` (1000 m here), and charges `c` for every aircraft the tracker missed and every ghost
+track it invented. It averages over the larger set. It splits into a **localisation** part (how
+far the paired tracks are off) and a **cardinality** part (the cost of the wrong count), with
+`total^2 = localisation^2 + cardinality^2`. Example (checked by running the code): two true
+aircraft at 0 m and 5,000 m, and one track 100 m from the first:
+
+| Part | Value |
+|---|---|
+| localisation | sqrt(100^2 / 2) = **70.7 m** (the one pair, averaged over 2) |
+| cardinality | sqrt(1000^2 / 2) = **707.1 m** (one aircraft missed) |
+| total OSPA | sqrt((100^2 + 1000^2) / 2) = **710.6 m** |
+
+A perfect tracker scores 0, and one that finds nothing scores 1000.
+
 ## 4. Project map
 
 | Path | Purpose |
@@ -332,6 +405,10 @@ a very calm Kalman filter on straight flight (section 7.1).
 | `tracker/simulate.py` | the radar and target simulator; `Track` data; `simulate_batch`; `forward_fill` |
 | `tracker/kalman.py` | the constant-velocity Kalman filter, reusable `predict` and `update` steps, the coordinated-turn model, optional covariance and NIS output |
 | `tracker/imm.py` | the IMM filter (several Kalman filters blended by mode probability) and its tuned settings |
+| `tracker/scene.py` | multi-aircraft scenes: several targets plus Poisson false alarms per scan, with birth and death |
+| `tracker/association.py` | gating (Mahalanobis distance, 99% chi-squared gate) and Hungarian assignment, plus a greedy version for comparison |
+| `tracker/multitarget.py` | the multi-target track manager: tentative and confirmed tracks, M-of-N confirmation, deletion, duplicate removal |
+| `tracker/ospa.py` | the OSPA distance between the true aircraft and the tracks, with localisation and cardinality parts |
 | `tracker/metrics.py` | position error, RMSE (with burn-in), and the shared evaluation helpers |
 | `tracker/scenarios.py` | the five test scenarios, the Kalman `q` values, and `random_radar` for training |
 | `tracker/dataset.py` | turns tracks into tensors for the network; the input features; hybrid features |
@@ -342,6 +419,7 @@ a very calm Kalman filter on straight flight (section 7.1).
 | `train_neural.py` | trains the GRU and prints a per-scenario report |
 | `run_compare.py` | one table: raw radar, Kalman, IMM, GRU on seed-42 test tracks |
 | `run_eval.py` | multi-seed evaluation of raw radar, Kalman, IMM and GRU: confidence intervals, paired verdicts, filter consistency |
+| `run_multitarget.py` | multi-target evaluation: aircraft counts x clutter rates, scored with OSPA and the confirmed-track count |
 | `export_demo.py` | writes `web/data.js` (example tracks and results) for the demo page |
 | `web/index.html` | the demo page: radar (PPI) view, close-up view, results bars |
 | `web/data.js` | generated by `export_demo.py`; committed so the site works without training |
@@ -350,6 +428,11 @@ a very calm Kalman filter on straight flight (section 7.1).
 | `tests/test_stats.py` | tests for the statistics helpers and the Kalman diagnostics |
 | `tests/test_kalman_refactor.py` | proves the reusable Kalman steps give bit-identical results to the original loop |
 | `tests/test_imm.py` | IMM filter, mixing, combining, turn-model and mode-probability tests |
+| `tests/test_scene.py` | scene simulation: clutter rate, uniform spread, detection fraction, noise, shuffling, birth and death |
+| `tests/test_association.py` | gating, Hungarian assignment checked against brute force, greedy comparison |
+| `tests/test_multitarget.py` | track manager: one target, clutter only, two targets, a vanishing target, coasting, duplicates |
+| `tests/test_ospa.py` | OSPA hand cases: equal sets, empty sets, a missing aircraft, a ghost, best pairing |
+| `tests/test_run_multitarget.py` | the multi-target scoring and one evaluation cell |
 | `.github/workflows/pages.yml` | publishes `web/` to GitHub Pages when it changes on `main` |
 | `requirements.txt` | Python dependencies (numpy, matplotlib, pytest, torch, scipy) |
 | `.gitignore` | keeps the virtual environment, caches and `outputs/` out of git |
@@ -436,7 +519,8 @@ NIS has a practical advantage: it can be computed on real data, where the truth 
 ## 7. Results
 
 All GRU numbers are for the recommended model, trained with
-`python train_neural.py --hybrid --randomize --hidden 128 --layers 2 --epochs 50`.
+`python train_neural.py` (its defaults are hybrid, randomised radar, hidden 128, two layers and
+50 epochs; the older long form `--hybrid --randomize --hidden 128 --layers 2 --epochs 50` is identical).
 
 ### 7.1 Position error over 10 seeds (`python run_eval.py`)
 
@@ -543,6 +627,38 @@ data points the interval is enormous (t = 12.7). The same small gap became clear
 once there were ten seeds (-5.1 +/- 0.8 m). More data does not change the answer, it
 lets you be **sure** of it.
 
+### 7.5 Several aircraft among false alarms (`python run_multitarget.py`)
+
+The track manager (`q` = 100, 3 hits in 5 scans to confirm, dropped after 5 misses) was run on
+10 freshly simulated scenes per cell (seeds 10,000 and up), 120 scans each, aircraft flying random
+maneuvers, each detected with probability 0.9 per scan. The first 10 scans are skipped. OSPA in metres
+(lower is better, 0 is perfect, 1000 means nothing found), mean +/- 95% interval over the scenes:
+
+| aircraft | false plots per scan | OSPA | localisation | cardinality | tracks found (true count) |
+|---|---|---|---|---|---|
+| 1 | 0 | 116.9 +/- 33.2 | 116.9 | 0.0 | 1.00 (1) |
+| 1 | 5 | 99.8 +/- 24.6 | 92.7 | 8.4 | 1.01 (1) |
+| 1 | 20 | 128.5 +/- 42.1 | 116.8 | 13.0 | 1.01 (1) |
+| 3 | 0 | 118.9 +/- 19.4 | 111.2 | 9.4 | 3.01 (3) |
+| 3 | 5 | 119.0 +/- 17.9 | 108.7 | 12.9 | 3.02 (3) |
+| 3 | 20 | 130.8 +/- 20.1 | 117.6 | 16.4 | 3.03 (3) |
+| 6 | 0 | 137.7 +/- 13.2 | 124.1 | 18.1 | 6.02 (6) |
+| 6 | 5 | 148.5 +/- 19.7 | 132.7 | 21.4 | 6.05 (6) |
+| 6 | 20 | 157.3 +/- 23.6 | 137.8 | 26.9 | 6.04 (6) |
+
+**Reading it.**
+- **The count is almost always right.** Even with 20 false plots per scan the tracker reports
+  within 0.05 of the true number of aircraft on average, so the cardinality part is small (0 to 27 m).
+- **The error is mostly position error.** The localisation part (about 90 to 140 m) is close to what a
+  single `q` = 100 Kalman filter achieves on one aircraft alone (section 7.1), so tracking among clutter
+  costs little extra accuracy.
+- **More aircraft and more clutter cost a little.** From 1 to 6 aircraft with no clutter, OSPA rose from
+  about 117 to 138 m, and 20 false plots per scan add roughly 10 to 20 m on top.
+- **Honest limits.** Only 10 scenes per cell, so the intervals are wide (the one-aircraft rows overlap
+  each other, so their order means nothing). The aircraft are placed at random, so there is no dedicated
+  test of crossing or very close targets, where association is hardest. The tracker uses one Kalman
+  `q` for everything (the IMM could be plugged in per track, but is not).
+
 ## 8. Lessons learned
 
 - **A units bug hid in plain sight.** The training loss averaged the squared error over the
@@ -575,6 +691,11 @@ lets you be **sure** of it.
   behaviours nothing tested (coasting through missed scans, and adding the spread between models
   when combining), and one test that rested on a wrong premise: with switching forbidden,
   evidence still accumulates, so the agile model eventually takes over a maneuvering track.
+- **A one-in-a-hundred event is not rare over many scans.** The 99% gate lets about 1% of true plots
+  fall outside their own track. That plot started a second track on the same aircraft, which then
+  shared its plots for the rest of the flight, so one aircraft showed up as two tracks. Only a test
+  with two aircraft and no clutter exposed it. The fixes were to never start a track from a plot
+  inside an existing gate and to merge tracks whose position and velocity agree.
 - **A negative result is still a result.** "Training longer does not help" saved time and
   pointed at the real limits.
 - **Pairing, many seeds and consistency checks changed what we could claim.** The small wins
@@ -597,7 +718,7 @@ lets you be **sure** of it.
 | recurrent network | a network that reads a sequence one step at a time and keeps a memory |
 | GRU | Gated Recurrent Unit: a recurrent network whose gates decide what to remember or forget |
 | residual learning | learning a correction to a base estimate instead of the estimate itself |
-| hybrid | the GRU starts from a Kalman estimate and sees Kalman outputs as inputs (`--hybrid`) |
+| hybrid | the GRU starts from a Kalman estimate and sees Kalman outputs as inputs (the default; `--no-hybrid` turns it off) |
 | causal | using only past and present data, never the future |
 | validation | scoring on held-out tracks the model never trains on, to choose the best epoch |
 | overfitting | learning the training data's quirks; training error low, validation error high |
@@ -619,6 +740,19 @@ lets you be **sure** of it.
 | likelihood | how probable the new plot was under a model's prediction; high means that model predicted well |
 | coordinated turn | a motion model where the velocity rotates at a fixed turn rate, so the target flies a circle |
 | turn rate | how fast the heading changes, in radians per second (0.05 rad/s is about 2.9 degrees per second) |
+| clutter | false alarms: plots that come from no aircraft |
+| data association | deciding which plot belongs to which track |
+| gating | only considering plots statistically close to a track's prediction |
+| Mahalanobis distance | distance measured in standard deviations, using the covariance (squared: `y^T S^-1 y`) |
+| Hungarian algorithm | finds the one-to-one pairing of tracks and plots with the smallest total cost |
+| greedy (nearest-neighbour) | each track takes its nearest plot in turn; simple, but can force bad pairings |
+| tentative track | a new track not yet trusted; started from one unclaimed plot |
+| confirmed track | a track that earned M hits in N scans and is reported |
+| M-of-N confirmation | the rule "M hits within N scans" that keeps false alarms out of the answer |
+| coasting | predicting without a plot while a track misses scans |
+| ghost track | a reported track that matches no real aircraft |
+| OSPA | a distance between a set of true positions and a set of tracks, counting wrong positions and the wrong count |
+| localisation / cardinality | the two parts of OSPA: how far paired tracks are off, and the cost of the wrong number of tracks |
 
 ## 10. Exam self-check
 
@@ -778,13 +912,51 @@ Nothing is learned without a plot, so they only follow the transition matrix (mu
 toward their long-run values while every filter coasts.
 </details>
 
+<details><summary><b>26.</b> Why is a plot not simply given to the nearest track? What do gating and the Hungarian algorithm add?</summary>
+
+Gating throws out pairs that are statistically implausible (squared Mahalanobis distance above 9.21 for
+99% coverage), so false alarms and far-away plots are not forced onto a track. The Hungarian algorithm
+then picks the one-to-one pairing with the smallest total cost, where nearest-first (greedy) can make an
+early cheap choice that forces a terrible one later (total cost 9 against 4 in the section 3.8 example).
+</details>
+
+<details><summary><b>27.</b> Why must a new track be "confirmed" before it is reported?</summary>
+
+A single false plot is enough to start a track. Real aircraft keep producing plots near the prediction,
+so they collect 3 hits in 5 scans; false alarms almost never do. Tentative tracks that cannot get there
+are dropped, so clutter stays out of the answer.
+</details>
+
+<details><summary><b>28.</b> A track predicts (0, 0) with S = 400 on the diagonal. Is a plot at (70, 0) inside the 99% gate?</summary>
+
+d^2 = 70^2 / 400 = 12.25, above 9.21, so it is outside the gate. A plot at (30, 0) gives 2.25 and is inside.
+</details>
+
+<details><summary><b>29.</b> Two true aircraft, one track 100 m from the first, none for the second. What is the OSPA with c = 1000 m, p = 2?</summary>
+
+Averaged over the larger set (2): total = sqrt((100^2 + 1000^2) / 2) = 710.6 m. Localisation is
+sqrt(100^2 / 2) = 70.7 m and cardinality is sqrt(1000^2 / 2) = 707.1 m, and 70.7^2 + 707.1^2 = 710.6^2.
+</details>
+
+<details><summary><b>30.</b> Why is a plain RMSE not enough to score a multi-target tracker?</summary>
+
+RMSE needs one estimate per truth in a known order. A multi-target tracker returns a set of tracks of
+unknown size and order, and it can miss aircraft or invent ghosts. OSPA pairs the sets optimally and
+also charges for the wrong count.
+</details>
+
+<details><summary><b>31.</b> Why did the first tracker show one aircraft as two tracks, and what fixed it?</summary>
+
+About 1% of true plots fall outside their own track's 99% gate. That plot started a new tentative track
+on the same aircraft, and the two tracks then shared its plots. Fixes: no new track from a plot inside any
+track's gate, and merge tracks whose position and velocity agree.
+</details>
+
 ## 11. Roadmap and further reading
 
-**Where the project could go next** (the IMM filter is done, see sections 3.7 and 7)
-- **Several targets and false alarms:** gating (only consider plots near a prediction), the
-  Hungarian algorithm for assigning plots to tracks, clutter as random false plots, and
-  track management (confirm after M hits in N scans, drop after misses). This is the biggest
-  step up in realism.
+**Where the project could go next** (the IMM filter and multi-target tracking are done, see sections 3.7, 3.8 and 7)
+- **Harder multi-target cases:** crossing and very close aircraft, an IMM inside every track, and
+  track-to-track swaps scored explicitly.
 - **A learned gain (KalmanNet style):** keep the Kalman predict-and-update structure but let a
   small GRU output the gain, so the physics stays fixed and only the gain is learned. It
   should hold up better outside the training range than a free-form GRU.
@@ -810,6 +982,6 @@ toward their long-run values while every filter coasts.
 - [x] Step 4: browser demo with a traditional radar (PPI) view (`web/`)
 - [x] Rigorous evaluation: many seeds, confidence intervals, paired comparison, NEES and NIS
 - [x] IMM filter as a stronger classical baseline (it beat the GRU in every scenario)
-- [ ] Multi-target tracking with clutter
+- [x] Multi-target tracking with clutter (gating, Hungarian assignment, M-of-N track management, OSPA)
 - [ ] KalmanNet-style learned gain
 - [ ] Real ADS-B flight data

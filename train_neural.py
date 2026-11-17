@@ -1,4 +1,9 @@
-"""Train GRU Tracker on Simulated Tracks."""
+"""Train the GRU tracker on simulated tracks.
+
+A bare `python train_neural.py` trains the recommended model: hybrid (starts from a Kalman
+filter), randomised radar settings, hidden size 128, two layers, 50 epochs. Use
+`--no-hybrid --no-randomize --hidden 64 --layers 1 --epochs 30` for the small plain model.
+"""
 import argparse
 
 import numpy as np
@@ -68,21 +73,28 @@ def report_by_scenario(model, val_sets):
             print(f"{name:<12}{rmse_m(base, truth):>11.1f}{rmse_m(model(feats, base), truth):>10.1f}")
 
 
-def main():
-
-    ap = argparse.ArgumentParser()
-    ap.add_argument("--epochs", type = int, default = 30)
+def build_parser() -> argparse.ArgumentParser:
+    """The command-line options (separate from main so tests can check the defaults)."""
+    ap = argparse.ArgumentParser(description = "Train the GRU tracker. With no options it trains the "
+                                 "recommended model (hybrid, randomised radar, hidden 128, 2 layers).")
+    ap.add_argument("--epochs", type = int, default = 50)
     ap.add_argument("--n", type = int, default = 400, help = "Training tracks per scenario")
     ap.add_argument("--batch", type = int, default = 64)
     ap.add_argument("--lr", type = float, default = 1e-3)
-    ap.add_argument("--hidden", type = int, default = 64, help = "GRU memory size")
-    ap.add_argument("--layers", type = int, default = 1, help = "stacked GRU layers")
+    ap.add_argument("--hidden", type = int, default = 128, help = "GRU memory size")
+    ap.add_argument("--layers", type = int, default = 2, help = "stacked GRU layers")
     ap.add_argument("--wd", type = float, default = 1e-4, help = "weight decay (a small penalty on big weights)")
     ap.add_argument("--patience", type = int, default = 8, help = "stop after this many epochs without improvement (0 = never)")
-    ap.add_argument("--hybrid", action = "store_true", help = "start from a Kalman filter and learn a correction")
-    ap.add_argument("--randomize", action = "store_true", help = "train on random radar settings")
+    ap.add_argument("--hybrid", action = argparse.BooleanOptionalAction, default = True,
+                    help = "start from a Kalman filter and learn a correction (default on; --no-hybrid turns it off)")
+    ap.add_argument("--randomize", action = argparse.BooleanOptionalAction, default = True,
+                    help = "train on random radar settings (default on; --no-randomize uses the five fixed scenarios)")
     ap.add_argument("--name", default = "gru_tracker", help = "checkpoint name in outputs/")
-    args = ap.parse_args()
+    return ap
+
+
+def main(argv = None):
+    args = build_parser().parse_args(argv)
     OUT_DIR.mkdir(exist_ok = True)
     ckpt = checkpoint(args.name)
     torch.manual_seed(0)
