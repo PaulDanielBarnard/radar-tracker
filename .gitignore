@@ -9,3 +9,6 @@ __pycache__/
 outputs/
 *.log
 .claude/
+
+# local ADS-B data (never committed)
+data/
