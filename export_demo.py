@@ -59,13 +59,22 @@ def reference_rmse(n_val: int) -> dict:
     validation numbers in the recording, so the numbers are directly comparable.
     """
     ref = {}
+    imm = default_imm()
     for i, (name, (mode, radar)) in enumerate(SCENARIOS.items()):
         tracks = simulate_batch(n_val, mode, radar, TARGET, seed=VAL_SEED + i)
         kf = {f"{q:g}": round(rmse_over_tracks(evaluate(tracks, ConstantVelocityKF(q=q))), 1) for q in Q_VAL}
         best_q = min(kf, key=kf.get)
         ref[name] = {"raw": round(rmse_over_tracks(raw_measurement_error(tracks)), 1), "kf": kf,
-                     "bestKf": {"q": best_q, "rmse": kf[best_q]}}
+                     "bestKf": {"q": best_q, "rmse": kf[best_q]},
+                     "imm": round(rmse_over_tracks(evaluate(tracks, imm)), 1)}
     return ref
+
+
+def demo_imm_lines() -> dict:
+    """The IMM filter's estimate on each demo track (the first seed-42 track of every scenario)."""
+    imm = default_imm()
+    return {name: pts(imm.run(simulate_batch(1, mode, radar, TARGET, seed=42)[0])[:, :2])
+            for name, (mode, radar) in SCENARIOS.items()}
 
 
 def training_payload(rec: dict, ref: dict) -> dict:
@@ -88,6 +97,8 @@ def write_training_js(recording_path, out_path) -> int:
     """Convert a training recording (JSON) into web/training.js. Returns the file size in bytes."""
     rec = json.loads(open(recording_path, encoding="utf-8").read())
     n_val = max(int(rec["args"].get("n", 400)) // 4, 1)
+    for name, line in demo_imm_lines().items():          # the recording has no IMM: add it for comparison
+        rec["demo"][name]["imm"] = line
     payload = training_payload(rec, reference_rmse(n_val))
     out_path.write_text("window.TRAINING = " + json.dumps(payload, separators=(",", ":")) + ";\n", encoding="utf-8")
     size = out_path.stat().st_size

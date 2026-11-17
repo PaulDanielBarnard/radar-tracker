@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Radar Tracker Demo</title>
-<meta name="description" content="Watch a Kalman filter and a learned GRU clean up noisy radar plots of a maneuvering aircraft.">
+<meta name="description" content="Watch Kalman filters, an IMM filter and learned trackers (GRU, KalmanNet) clean up noisy radar plots of a maneuvering aircraft.">
 <style>
   :root {
     --bg: #f6f7f9; --panel: #ffffff; --ink: #14181f; --muted: #5b6573; --line: #dde1e7;
@@ -124,7 +124,7 @@
   <header class="topbar">
     <div>
       <h1>Cleaning up noisy radar</h1>
-      <p>A radar sees a maneuvering aircraft only through noisy dots. Watch a classic Kalman filter and a small neural network (a GRU) try to recover the true flight path from those dots.</p>
+      <p>A radar sees a maneuvering aircraft only through noisy dots. Watch classic Kalman filters, a stronger multi-model filter (the IMM) and learned trackers (a GRU network, a learned-gain filter) try to recover the true flight path from those dots.</p>
     </div>
     <button id="theme" type="button" aria-label="Toggle light and dark theme">Theme</button>
   </header>
@@ -144,10 +144,10 @@
     <div class="legend" id="legend"></div>
 
     <div class="stage">
-      <canvas id="main" role="img" aria-label="Top-down view of the aircraft's true path, the noisy radar plots, and the Kalman and GRU estimates"></canvas>
+      <canvas id="main" role="img" aria-label="Top-down view of the aircraft's true path, the noisy radar plots, and the estimates of the Kalman filter, GRU, IMM, KalmanNet and the IMM-fed GRU"></canvas>
       <div class="badge" id="badge"></div>
     </div>
-    <canvas id="err" role="img" aria-label="Position error over time for raw radar, Kalman filter and GRU"></canvas>
+    <canvas id="err" role="img" aria-label="Position error over time for raw radar and each tracker that is switched on"></canvas>
 
     <div class="controls">
       <button id="play" type="button">Pause</button>
@@ -170,12 +170,12 @@
     <h2 id="bars-h">Which one wins?</h2>
     <p class="sub">Average position error in metres over 500 unseen tracks per scenario (lower is better). Click a scenario to replay it above.</p>
     <div class="bars" id="bars"></div>
-    <p class="note">Bars are capped at 700 m. A Kalman filter tuned for straight flight (q=0.1) is far worse than the raw radar in turns, which is why one fixed setting never wins everywhere. The GRU never saw these tracks during training.</p>
+    <p class="note">Bars are capped at 700 m. A Kalman filter tuned for straight flight (q=0.1) is far worse than the raw radar in turns, which is why one fixed setting never wins everywhere. The IMM runs several motion models at once, and the learned trackers never saw these tracks during training. "GRU fed the IMM" is the GRU that also receives the IMM's answer.</p>
   </section>
 
   <section class="panel" id="lab" aria-labelledby="lab-h" hidden>
     <h2 id="lab-h">Random lab</h2>
-    <p class="sub">Make your own flight and radar. The Kalman filters and the trained GRU run live in your browser, on plots that were never in the training data or the results above.</p>
+    <p class="sub">Make your own flight and radar. Raw radar, three Kalman filters, the IMM filter, the GRU, KalmanNet and the GRU fed the IMM all run live in your browser, on plots that were never in the training data or the results above.</p>
     <div class="lab-grid">
       <div class="lab-ctl">
         <label>Range noise <output id="o-sr"></output><input id="c-sr" type="range" min="10" max="300" step="5" value="50"></label>
@@ -194,7 +194,7 @@
         <p class="note" id="lab-warn" hidden>These settings are beyond what the GRU saw in training (noise up to 200 m and 0.02 rad, turn rate up to 0.05 rad/s), so expect it to struggle.</p>
       </div>
       <div>
-        <canvas id="lab-canvas" role="img" aria-label="Top-down view of your random flight: the true path, noisy radar plots, the Kalman filter and the GRU estimate"></canvas>
+        <canvas id="lab-canvas" role="img" aria-label="Top-down view of your random flight: the true path, noisy radar plots, and the estimates of the Kalman filter, the GRU and the extra tracker you picked"></canvas>
         <div class="controls">
           <button id="lab-play" type="button">Play</button>
           <input id="lab-scrub" type="range" min="0" max="119" value="119" aria-label="Scan number">
@@ -223,7 +223,7 @@
 
     <div class="learn-grid">
       <div>
-        <canvas id="l-radar" role="img" aria-label="Top-down view of one demo track: the true path, the noisy plots, the untrained starting guess and the GRU estimate at the chosen epoch"></canvas>
+        <canvas id="l-radar" role="img" aria-label="Top-down view of one demo track: the true path, the noisy plots, the untrained starting guess, the IMM filter for comparison and the GRU estimate at the chosen epoch"></canvas>
         <div class="legend small" id="l-legend"></div>
       </div>
       <div>
@@ -705,6 +705,7 @@
     ctx.globalAlpha = 1;
     line(d.truth, css("--truth"), 1.8, [], 0.9);
     if (S.ep > 0) line(first, css("--raw"), 1.4, [4, 4], 0.9);   // where training started
+    if (d.imm) line(d.imm, css("--imm"), 1.6, [], 0.9);          // the IMM filter, for comparison (not trained)
     line(est, css("--gru"), 2.4, [], 1);
     const end = est[est.length - 1];
     ctx.fillStyle = css("--gru"); ctx.beginPath(); ctx.arc(X(end), Y(end), 4.5, 0, 7); ctx.fill();
@@ -762,7 +763,8 @@
 
   // ---- per-scenario bars: raw radar, best Kalman, and the GRU at this epoch ----
   const CAP = Math.ceil(Math.max(...T.scenarios.map((n) => Math.max(T.ref[n].raw, T.epochs[0].rmse[n]))) / 100) * 100;
-  const ROWS = [["raw", "--raw"], ["kf", "--kf"], ["gru", "--gru"]];
+  const HAS_IMM = T.ref[T.scenarios[0]].imm !== undefined;       // older training.js files have no IMM numbers
+  const ROWS = [["raw", "--raw"], ["kf", "--kf"], ...(HAS_IMM ? [["imm", "--imm"]] : []), ["gru", "--gru"]];
 
   // built once (so keyboard focus survives), then only the widths and numbers change
   function buildBars() {
@@ -783,6 +785,7 @@
     document.querySelectorAll("#l-bars .group").forEach((g, i) => {
       const n = T.scenarios[i], ref = T.ref[n];
       const vals = { raw: ["Raw radar", ref.raw], kf: [`Kalman q=${ref.bestKf.q}`, ref.bestKf.rmse], gru: ["GRU", e.rmse[n]] };
+      if (HAS_IMM) vals.imm = ["IMM filter", ref.imm];
       const min = Math.min(...Object.values(vals).map((v) => v[1]));
       g.classList.toggle("current", i === S.scn);
       g.querySelectorAll(".row").forEach((row) => {
@@ -805,8 +808,10 @@
     const cmp = Math.round(g) === Math.round(k) ? `That is level with the best Kalman filter (q=${ref.bestKf.q}, ${Math.round(k)} m).`
               : g < k ? `The GRU is now ahead of the best Kalman filter (${Math.round(k)} m).`
               : `The best Kalman filter (q=${ref.bestKf.q}) is still ahead at ${Math.round(k)} m.`;
+    const immTxt = ref.imm === undefined ? "" :
+      ` The IMM filter, which needs no training, gets ${Math.round(ref.imm)} m${g < ref.imm ? " and the GRU is ahead of it" : " and is still ahead of the GRU"}.`;
     $("l-verdict").innerHTML = `<strong>${NICE[n] || n}, epoch ${S.ep}:</strong> the GRU's average error is <strong>${Math.round(g)} m</strong> ` +
-      `(raw radar ${Math.round(ref.raw)} m). ${cmp} ${state}`;
+      `(raw radar ${Math.round(ref.raw)} m). ${cmp}${immTxt} ${state}`;
   }
 
   function draw() { drawRadar(); drawLoss(); updateBars(); updateText(); }
@@ -835,7 +840,8 @@
   $("l-tabs").innerHTML = T.scenarios.map((n, i) => `<button type="button" role="tab" data-i="${i}" aria-selected="${i === S.scn}">${NICE[n] || n}</button>`).join("");
   document.querySelectorAll("#l-tabs button").forEach((b) => b.addEventListener("click", () => selectScenario(+b.dataset.i)));
   const sw = (c, t) => `<span><i class="sw" style="background:var(${c})"></i>${t}</span>`;
-  $("l-legend").innerHTML = sw("--truth", "True path") + sw("--plots", "Radar plots") + sw("--raw", "Starting guess (epoch 0)") + sw("--gru", "GRU now");
+  $("l-legend").innerHTML = sw("--truth", "True path") + sw("--plots", "Radar plots") + sw("--raw", "Starting guess (epoch 0)") +
+    (T.demo[T.scenarios[0]].imm ? sw("--imm", "IMM filter (for comparison)") : "") + sw("--gru", "GRU now");
   $("l-loss-legend").innerHTML = sw("--gru", "Training loss") + sw("--kf", "Validation loss (unseen tracks)");
   buildBars();
   $("l-epoch").max = N;
@@ -871,10 +877,11 @@
   const BURN = (window.DEMO && window.DEMO.burnIn) || 10;
   const QS = [0.1, 10, 100];
   const EXTRA_MODELS = window.GRU_MODEL_IMM || window.KNET_MODEL;      // web/model_extra.js (optional)
-  const METHODS = [["raw", "Raw radar", "--raw"], ["kf0.1", "Kalman q=0.1", "--kf"], ["kf10", "Kalman q=10", "--kf"],
-                   ["kf100", "Kalman q=100", "--kf"], ["imm", "IMM filter", "--imm"], ["gru", "GRU", "--gru"]];
-  if (window.KNET_MODEL) METHODS.push(["knet", "KalmanNet", "--knet"]);
-  if (window.GRU_MODEL_IMM) METHODS.push(["gruimm", "GRU fed the IMM", "--gruimm"]);
+  // [key, label, colour variable, swatch/bar opacity]: the three Kalman filters share a hue, so shade them
+  const METHODS = [["raw", "Raw radar", "--raw", 1], ["kf0.1", "Kalman q=0.1", "--kf", 0.4], ["kf10", "Kalman q=10", "--kf", 0.7],
+                   ["kf100", "Kalman q=100", "--kf", 1], ["imm", "IMM filter", "--imm", 1], ["gru", "GRU", "--gru", 1]];
+  if (window.KNET_MODEL) METHODS.push(["knet", "KalmanNet", "--knet", 1]);
+  if (window.GRU_MODEL_IMM) METHODS.push(["gruimm", "GRU fed the IMM", "--gruimm", 1]);
   const S = { flight: null, t: 119, playing: false, seed: 0 };
   let last = 0;
 
@@ -967,8 +974,8 @@
     $("lab-scan").textContent = `scan ${S.t + 1}/${F.track.truth.length}`;
     $("lab-scrub").value = S.t;
     const best = Math.min(...METHODS.map(([key]) => F.rmse[key]));
-    $("lab-cards").innerHTML = METHODS.map(([key, name, col]) =>
-      `<div class="card"><div class="name"><span class="sw" style="background:var(${col})"></span>${name}</div>
+    $("lab-cards").innerHTML = METHODS.map(([key, name, col, op]) =>
+      `<div class="card"><div class="name"><span class="sw" style="background:var(${col});opacity:${op}"></span>${name}</div>
         <div class="big">${Math.round(F.rmse[key])} m${F.rmse[key] === best ? " ★" : ""}</div><div class="small">average error, whole flight</div></div>`).join("");
     drawFlight();
   }
@@ -998,8 +1005,8 @@
       $("mc-status").textContent = `Average error over ${N} random flights (radar noise ${s.radar.sigmaR} m / ${s.radar.sigmaTheta.toFixed(3)} rad, ${Math.round((1 - s.radar.pDetect) * 100)}% missed, motion: ${s.motion}). Lower is better; ± is a 95% interval over flights.`;
       const stats = results.map((r) => { const m = r.reduce((a, b) => a + b, 0) / N, sd = Math.sqrt(r.reduce((a, b) => a + (b - m) ** 2, 0) / (N - 1)); return { m, ci: 1.96 * sd / Math.sqrt(N) }; });
       const cap = Math.max(...stats.map((x) => x.m)) * 1.05, min = Math.min(...stats.map((x) => x.m));
-      $("mc-bars").innerHTML = `<div class="group">` + METHODS.map(([, name, col], j) =>
-        `<div class="row${stats[j].m === min ? " best" : ""}"><span>${name}</span><span class="track"><span class="fill" style="display:block;width:${stats[j].m / cap * 100}%;background:var(${col})"></span></span>
+      $("mc-bars").innerHTML = `<div class="group">` + METHODS.map(([, name, col, op], j) =>
+        `<div class="row${stats[j].m === min ? " best" : ""}"><span>${name}</span><span class="track"><span class="fill" style="display:block;width:${stats[j].m / cap * 100}%;background:var(${col});opacity:${op}"></span></span>
           <span class="val">${Math.round(stats[j].m)} ± ${Math.round(stats[j].ci)} m${stats[j].m === min ? " ★" : ""}</span></div>`).join("") + `</div>`;
     };
     setTimeout(step, 0);
@@ -1026,8 +1033,16 @@
     if (S.t >= S.flight.track.truth.length - 1) S.t = 0;
     S.playing = !S.playing; $("lab-play").textContent = S.playing ? "Pause" : "Play"; showFlight();
   });
-  $("lab-legend").innerHTML = [["--truth", "True path"], ["--plots", "Radar plots"], ["--kf", "Kalman filter"], ["--gru", "GRU (trained on simulated flights)"]]
-    .map(([c, t]) => `<span><i class="sw" style="background:var(${c})"></i>${t}</span>`).join("");
+  // the legend follows what is drawn: the chosen Kalman q and the chosen extra tracker
+  function updateLabLegend() {
+    const xk = $("lab-x").value, xm = METHODS.find((m) => m[0] === xk);
+    const items = [["--truth", "True path"], ["--plots", "Radar plots"], ["--kf", `Kalman filter (q=${$("lab-q").value})`],
+                   ["--gru", "GRU (trained on simulated flights)"], ...(xm ? [[xm[2], xm[1]]] : [])];
+    $("lab-legend").innerHTML = items.map(([c, t]) => `<span><i class="sw" style="background:var(${c})"></i>${t}</span>`).join("");
+  }
+  $("lab-x").addEventListener("change", updateLabLegend);
+  $("lab-q").addEventListener("change", updateLabLegend);
+  updateLabLegend();
   let acc = 0;
   function frame(now) {
     const dt = Math.min((now - last) / 1000, 0.1); last = now;

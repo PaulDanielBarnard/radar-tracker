@@ -44,7 +44,7 @@ def test_the_writer_produces_a_script_the_page_can_load(recording, tmp_path):
     assert set(e) == {"epoch", "trainLoss", "valLoss", "valRmse", "saved", "rmse", "est"}
     assert set(e["rmse"]) == set(SCENARIOS) and set(e["est"]) == set(SCENARIOS)
     assert all(len(e["est"][n]) == TARGET.n_steps for n in SCENARIOS)
-    assert set(t["demo"]["turning"]) == {"truth", "meas", "base"}
+    assert set(t["demo"]["turning"]) == {"truth", "meas", "base", "imm"}
     assert "args" not in t and t["epochs"][0]["trainLoss"] is None
 
 
@@ -94,6 +94,21 @@ def test_the_reference_tracks_start_at_the_training_validation_seed_2000():
     tracks = simulate_batch(2, mode, radar, TARGET, seed=2000)                  # the seed train_neural validates on
     expected = rmse_over_tracks(raw_measurement_error(tracks))
     assert export_demo.reference_rmse(2)["straight"]["raw"] == pytest.approx(expected, abs=0.06)
+
+
+def test_the_imm_is_a_reference_bar_and_a_line_on_each_demo_track(recording, tmp_path):
+    from tracker.imm import default_imm
+    out = tmp_path / "training.js"
+    export_demo.write_training_js(recording, out)
+    t = load_js(out)
+    mode, radar = SCENARIOS["turning"]
+    track = simulate_batch(1, mode, radar, TARGET, seed=42)[0]
+    expected = default_imm().run(track)[:, :2]
+    got = np.array(t["demo"]["turning"]["imm"])
+    np.testing.assert_allclose(got, expected, atol=0.06)
+    tracks = simulate_batch(2, mode, radar, TARGET, seed=export_demo.VAL_SEED + 1)
+    assert t["ref"]["turning"]["imm"] == pytest.approx(rmse_over_tracks(evaluate(tracks, default_imm())), abs=0.06)
+    assert t["ref"]["turning"]["imm"] < t["ref"]["turning"]["kf"]["10"]      # sanity: the IMM is not a broken filter
 
 
 def test_a_file_over_the_size_budget_gets_a_warning(recording, tmp_path, monkeypatch, capsys):
