@@ -15,6 +15,10 @@ SCENARIOS = {
     "missed_30": ("random", replace(BASE_RADAR,p_detect=0.7))
 }
 
+# A radar noisier than anything used in training (random_radar stops at 200 m and 0.02 rad),
+# to see which trackers still cope outside the conditions they learned from.
+STRESS = ("random", replace(BASE_RADAR, sigma_r=300.0, sigma_theta=0.03))
+
 Q_VAL = [0.1, 1.0, 10.0, 100.0]
 
 def random_radar(rng) -> RadarConfig:
