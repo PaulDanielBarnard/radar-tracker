@@ -51,7 +51,7 @@ python -m pytest                       # all tests should pass
 | Command | What it does | Takes |
 |---|---|---|
 | `python run_baseline.py` | Kalman filters (4 settings) vs raw radar on every scenario; saves plots to `outputs/` | seconds |
-| `python train_neural.py --hybrid --randomize --hidden 128 --layers 2 --epochs 50` | trains the GRU and saves `outputs/gru_tracker.pt` | about 5 minutes on a laptop CPU |
+| `python train_neural.py` | trains the recommended GRU (hybrid, randomised radar, hidden 128, 2 layers, 50 epochs) and saves `outputs/gru_tracker.pt` | about 5 minutes on a laptop CPU |
 | `python run_compare.py` | one table: raw radar vs Kalman vs IMM vs GRU (needs the trained model) | a few minutes |
 | `python run_eval.py` | the same comparison over 10 random seeds with confidence intervals and a filter-consistency check | about 30 minutes (`--seeds 2 --tracks 30` for a quick look) |
 | `python run_multitarget.py` | the multi-target tracker on 1, 3 and 6 aircraft among 0, 5 and 20 false plots per scan, scored with OSPA | about 6 minutes (`--scenes 2` for a quick look) |
@@ -63,7 +63,9 @@ Notes:
   (see `.gitignore`), so a fresh clone must run `train_neural.py` before `run_compare.py`,
   `run_eval.py` or `export_demo.py`.
 - Run commands from the project root, the folder that contains `run_baseline.py`.
-- `train_neural.py --help` lists every option (epochs, model size, learning rate, ...).
+- `train_neural.py --help` lists every option (epochs, model size, learning rate, ...). The bare
+  command trains the recommended model; `--no-hybrid --no-randomize --hidden 64 --layers 1
+  --epochs 30` gives the small plain model used in the early experiments.
   Use `--name` to save several models side by side and `--model` on the other scripts
   to pick one.
 
@@ -233,14 +235,14 @@ estimate = base position + correction        (correction = network output x 1000
 The output layer starts at **exactly zero**, so an untrained model returns the base
 position unchanged (a test checks this). Training can then only improve on the base.
 
-**Hybrid mode (`--hybrid`).** Normally the base is the latest raw plot. In hybrid mode the
+**Hybrid mode (on by default; `--no-hybrid` turns it off).** Without it the base is the latest raw plot. In hybrid mode the
 base is a Kalman filter's position (q = 100), and the network also sees the estimates of
 two Kalman filters (q = 0.1 and q = 100) as extra inputs. It starts at Kalman quality and
 learns where to deviate. This is the best-performing configuration.
 
 **How it learns** (`train_neural.py`):
-- *Training data:* 2000 simulated tracks. Normally 400 per scenario; with `--randomize`
-  every track gets its own random noise level and miss rate, so the model learns the
+- *Training data:* 2000 simulated tracks. Normally 400 per scenario; with randomisation
+  (the default; `--no-randomize` turns it off) every track gets its own random noise level and miss rate, so the model learns the
   general skill instead of five fixed cases.
 - *Loss:* the average squared distance error, but each track's error is divided by that
   track's **expected raw radar error** (about 182 m for the normal radar, 546 m for the
@@ -517,7 +519,8 @@ NIS has a practical advantage: it can be computed on real data, where the truth 
 ## 7. Results
 
 All GRU numbers are for the recommended model, trained with
-`python train_neural.py --hybrid --randomize --hidden 128 --layers 2 --epochs 50`.
+`python train_neural.py` (its defaults are hybrid, randomised radar, hidden 128, two layers and
+50 epochs; the older long form `--hybrid --randomize --hidden 128 --layers 2 --epochs 50` is identical).
 
 ### 7.1 Position error over 10 seeds (`python run_eval.py`)
 
@@ -715,7 +718,7 @@ maneuvers, each detected with probability 0.9 per scan. The first 10 scans are s
 | recurrent network | a network that reads a sequence one step at a time and keeps a memory |
 | GRU | Gated Recurrent Unit: a recurrent network whose gates decide what to remember or forget |
 | residual learning | learning a correction to a base estimate instead of the estimate itself |
-| hybrid | the GRU starts from a Kalman estimate and sees Kalman outputs as inputs (`--hybrid`) |
+| hybrid | the GRU starts from a Kalman estimate and sees Kalman outputs as inputs (the default; `--no-hybrid` turns it off) |
 | causal | using only past and present data, never the future |
 | validation | scoring on held-out tracks the model never trains on, to choose the best epoch |
 | overfitting | learning the training data's quirks; training error low, validation error high |
