@@ -38,7 +38,9 @@ if (Lab.gruForward) {
   const out = Lab.gruForward(V.model, feats, base);
   const dg = maxDiff(out, V.gru);
   check(`GRU output matches Python (max diff ${dg.toExponential(2)} m)`, dg < 0.05, dg);
-  const moved = Math.max(...out.map((p, k) => Math.hypot(p[0] - base[k][0], p[1] - base[k][1])));
+  const full = Lab.gruRun(V.model, track), dr = maxDiff(full, V.gru);
+  check(`gruRun (features + Kalman base + GRU in one call) matches Python (max diff ${dr.toExponential(2)} m)`, dr < 0.05, dr);
+  const moved =Math.max(...out.map((p, k) => Math.hypot(p[0] - base[k][0], p[1] - base[k][1])));
   check("the GRU test output differs from the base (not vacuous)", moved > 5, moved);
 }
 

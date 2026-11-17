@@ -1,6 +1,6 @@
 // Browser (and Node) port of the Python pieces the "Random lab" needs:
 // the flight simulator, the radar, the constant-velocity Kalman filter, the network's input
-// features. Every function mirrors its Python twin (named in the
+// features and the trained GRU itself. Every function mirrors its Python twin (named in the
 // comment), and web/test_js.mjs checks the numbers against vectors exported from Python.
 (function (root) {
   "use strict";
@@ -164,8 +164,38 @@
     return { feats, base };
   }
 
+  // ---- the trained GRU (gru_numpy.forward). model = window.GRU_MODEL ----
+  const sigmoid = (x) => 1 / (1 + Math.exp(-x));
+  function gruForward(model, feats, base) {
+    let seq = feats;
+    for (const L of model.layers) {
+      const H = L.w_hh[0].length;
+      let h = new Array(H).fill(0);
+      const out = [];
+      for (const x of seq) {
+        const gi = L.w_ih.map((row, i) => row.reduce((s, w, j) => s + w * x[j], L.b_ih[i]));
+        const gh = L.w_hh.map((row, i) => row.reduce((s, w, j) => s + w * h[j], L.b_hh[i]));
+        const nh = new Array(H);
+        for (let i = 0; i < H; i++) {
+          const r = sigmoid(gi[i] + gh[i]), z = sigmoid(gi[H + i] + gh[H + i]);
+          const n = Math.tanh(gi[2 * H + i] + r * gh[2 * H + i]);
+          nh[i] = (1 - z) * n + z * h[i];
+        }
+        h = nh; out.push(h);
+      }
+      seq = out;
+    }
+    const W = model.head.w, B = model.head.b;
+    return seq.map((h, k) => [0, 1].map((o) => base[k][o] + (h.reduce((s, v, j) => s + v * W[o][j], B[o])) * OUT_SCALE));
+  }
+
+  function gruRun(model, track) {
+    const hybrid = !!model.config.hybrid, { feats, base } = trackFeatures(track, hybrid);
+    return gruForward(model, feats, base);
+  }
+
   const api = { POS_SCALE, VEL_SCALE, OUT_SCALE, TARGET, RADAR, makeRng, simulateTruth, trackFromTruth, simulateTrack,
-    forwardFill, polarToCartCov, cvMatrices, kalmanRun, trackFeatures };
+    forwardFill, polarToCartCov, cvMatrices, kalmanRun, trackFeatures, gruForward, gruRun };
   if (typeof module !== "undefined" && module.exports) module.exports = api;
   else root.Lab = api;
 })(typeof window !== "undefined" ? window : globalThis);
