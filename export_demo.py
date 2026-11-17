@@ -19,7 +19,9 @@ from pathlib import Path
 import numpy as np
 import torch
 
+from tracker.imm import default_imm
 from tracker.kalman import ConstantVelocityKF
+from tracker.kalmannet import estimate as knet_estimate, load_kalmannet
 from tracker.metrics import BURN_IN, evaluate, raw_measurement_error, rmse_over_tracks
 from tracker.neural import gru_estimates, load_model
 from tracker.paths import ROOT, checkpoint
@@ -94,9 +96,26 @@ def write_training_js(recording_path, out_path) -> int:
     return size
 
 
+def extra_estimates(tracks, imm=None, knet=None, gru_imm=None) -> dict:
+    """Estimates (n, T, 2) of the other trackers the page can show, keyed by the names the page uses.
+
+    imm: the tuned IMM filter (always); knet: a learned-gain model or None; gru_imm: a GRU trained
+    with --imm or None. Missing models are simply left out and the page hides them.
+    """
+    imm = imm or default_imm()
+    out = {"imm": np.stack([imm.run(t)[:, :2] for t in tracks])}
+    if knet is not None:
+        out["knet"] = knet_estimate(knet, tracks)[:, :, :2]
+    if gru_imm is not None:
+        out["gruimm"] = gru_estimates(gru_imm, tracks)
+    return out
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--model", default="gru_tracker", help="checkpoint name in outputs/")
+    ap.add_argument("--imm-model", default="gru_imm", help="checkpoint of a GRU trained with --imm (skipped if missing)")
+    ap.add_argument("--kalmannet", default="kalmannet", help="learned-gain checkpoint (skipped if missing)")
     ap.add_argument("--training", default=None, metavar="PATH",
                     help="a recording made with train_neural.py --record; also writes web/training.js")
     ap.add_argument("--only-training", action="store_true", help="write only web/training.js (needs no trained model)")
@@ -117,20 +136,28 @@ def main():
     if not ckpt.exists():
         raise SystemExit(f"No trained model at {ckpt}. Run `python train_neural.py` first.")
     model = load_model(ckpt)
+    imm_model = load_model(checkpoint(args.imm_model)) if checkpoint(args.imm_model).exists() else None
+    knet = load_kalmannet(checkpoint(args.kalmannet)) if checkpoint(args.kalmannet).exists() else None
+    print("also exporting:", ", ".join(["IMM"] + (["KalmanNet"] if knet else []) + (["GRU fed the IMM"] if imm_model else [])))
 
     scenarios = []
     for name, (mode, radar) in SCENARIOS.items():
         tracks = simulate_batch(N_SCORE, mode, radar, TARGET, seed=42)
         truth = np.stack([t.truth[:, :2] for t in tracks])
         gru = gru_estimates(model, tracks)
+        extra = extra_estimates(tracks, knet=knet, gru_imm=imm_model)
 
         rmse = {
             "raw": rmse_over_tracks(raw_measurement_error(tracks)),
             "kf": {f"{q:g}": rmse_over_tracks(evaluate(tracks, ConstantVelocityKF(q=q))) for q in DEMO_Q},
             "gru": rmse_over_tracks(np.linalg.norm(gru - truth, axis=2)),
         }
+        for key, est in extra.items():
+            rmse[key] = rmse_over_tracks(np.linalg.norm(est - truth, axis=2))
         rmse["raw"] = round(rmse["raw"], 1)
         rmse["gru"] = round(rmse["gru"], 1)
+        for key in extra:
+            rmse[key] = round(rmse[key], 1)
         rmse["kf"] = {k: round(v, 1) for k, v in rmse["kf"].items()}
 
         shown = []
@@ -140,6 +167,7 @@ def main():
                 "meas": pts(t.meas_xy),
                 "kf": {f"{q:g}": pts(ConstantVelocityKF(q=q).run(t)[:, :2]) for q in DEMO_Q},
                 "gru": pts(gru[i]),
+                **{key: pts(est[i]) for key, est in extra.items()},
             })
         scenarios.append({"id": name, "blurb": BLURBS[name], "rmse": rmse, "tracks": shown})
         print(f"{name:<12} exported {len(shown)} tracks, RMSE over {N_SCORE}: {rmse}")
