@@ -14,7 +14,7 @@ plots, scenario by scenario)
 
 1. [How to read this README](#1-how-to-read-this-readme)
 2. [Quick start](#2-quick-start)
-3. [Concepts for beginners](#3-concepts-for-beginners)
+3. [Concepts for beginners](#3-concepts-for-beginners) (3.11 covers the web demo)
 4. [Project map](#4-project-map)
 5. [The five scenarios](#5-the-five-scenarios)
 6. [Evaluating fairly](#6-evaluating-fairly)
@@ -60,6 +60,8 @@ python -m pytest                       # all tests should pass
 | `python run_multitarget.py` | the multi-target tracker on 1, 3 and 6 aircraft among 0, 5 and 20 false plots per scan, scored with OSPA | about 6 minutes (`--scenes 2` for a quick look) |
 | `python export_demo.py` | bakes example tracks and results into `web/data.js` | a minute or two |
 | `python train_neural.py --record outputs/training_run.json` then `python export_demo.py --training outputs/training_run.json --only-training` | records a training run and bakes it into `web/training.js` for the page's "How the GRU learns" panel (the page works without that file) | about 6 minutes |
+| `python export_model.py` | writes `web/model.js` (the trained GRU for the browser's Random lab) | a second |
+| `python export_testvectors.py` then `node web/test_js.mjs` | checks the JavaScript port against Python | a few seconds |
 | `python -m http.server 8000 -d web` | serves the demo page at http://localhost:8000 | instant |
 
 Notes:
@@ -490,6 +492,48 @@ That is accurate to well under a metre per kilometre over the tens of kilometres
 **What to look for.** Does the ranking of trackers from the simulation survive contact with real
 flying? And is the best `q` still 100, or does a calmer real flight prefer less process noise?
 
+### 3.11 The web demo (`web/`)
+
+Open the page with `python -m http.server 8000 -d web`. It has four parts, top to bottom:
+
+1. **Live replay.** One simulated flight, replayed as a rotating radar screen (PPI) or as a zoomed
+   close-up. Orange dots are the noisy plots, black is the truth, blue a Kalman filter (pick its `q`),
+   green the GRU. The cards show the error now and the average so far.
+2. **Which one wins?** The average error per scenario over 500 unseen tracks (`web/data.js`). Click a
+   group to replay that scenario.
+3. **How the GRU learns.** A recorded 50-epoch training run (`web/training.js`) replayed epoch by epoch.
+   Drag the slider (or press play): the green line moves from the network's *starting guess* (epoch 0,
+   the Kalman base position) toward the true path, the loss chart gets a cursor, and the bars show the
+   GRU's validation error against raw radar and the best Kalman filter. Real numbers from that run
+   (validation tracks, not the test seeds of section 7): average error over the five scenarios fell from
+   177.1 m to 163.2 m at the saved epoch 49. If `training.js` is missing the panel hides itself.
+4. **Random lab.** Choose the radar noise, the missed scans, the motion and how hard it manoeuvres, or press
+   *Surprise me*, and the page simulates a brand-new flight and runs raw radar, three Kalman filters (q=0.1,
+   10, 100) and the trained GRU **live in JavaScript**. *Run 20 random flights* averages over many flights
+   (shown with a 95% interval over flights). Settings beyond the training range (noise above 200 m or 0.02 rad,
+   manoeuvres above 1x) show a warning, because the GRU has never seen them.
+
+**How the browser version was checked against Python.** The simulator, the Kalman filter, the 19 network
+input features and the GRU were re-written in `web/lab.js`. `export_testvectors.py` writes one fixed flight
+(with missed scans) and the answers Python gives for it to `web/testvectors.json`, and `node web/test_js.mjs`
+(no dependencies; also run by pytest when Node is installed) compares them. Measured differences: Kalman
+filter 5e-5 m, features 5e-7, a small test GRU 5e-5 m, and the real trained model (`web/model.js`) against
+PyTorch on a full flight 0.008 m. JavaScript's random numbers differ from NumPy's, so the simulator is
+checked *statistically* instead (range and bearing noise, detection rate, speeds, turn rates, straight
+flights really straight). I also broke `lab.js` on purpose 23 ways (wrong noise, a swapped gate, a dropped bias, ...): 22 were caught and 1 was a change with no effect.
+
+**Sizes.** `web/model.js` is the 128 x 2 hybrid GRU rounded to 5 significant digits (about 1.4 MB; the
+export warns above 4 MB); `web/training.js` is about 580 KB; one random flight with all five methods
+takes about 0.2 s in the browser.
+
+**Honest limits.** In one 20-flight click with the default radar (50 m, 0.005 rad, 10% missed, random
+manoeuvres) the averages were raw radar 214 m, Kalman q=0.1 806 m, q=10 188 m, q=100 114 +/- 17 m and
+GRU 112 +/- 13 m: the GRU and the best Kalman filter are *level*, as in section 7. Every click gives
+different flights, so do not read one run as a result; section 7 is the careful one. The checkpoint
+exported to `web/model.js` and replayed in `web/training.js` was trained for this demo with the default
+recipe; the section 7 tables were measured with an earlier checkpoint of the same recipe, so its numbers
+can differ slightly.
+
 ## 4. Project map
 
 | Path | Purpose |
@@ -520,6 +564,15 @@ flying? And is the best `q` still 100, or does a calmer real flight prefer less 
 | `web/index.html` | the demo page: radar (PPI) view, close-up view, results bars |
 | `web/data.js` | generated by `export_demo.py`; committed so the site works without training |
 | `web/training.js` | generated by `export_demo.py --training`: a recorded 50-epoch training run (about 580 KB) replayed by the "How the GRU learns" panel. Validation RMSE over the five scenarios fell from 177.1 m (untrained) to 163.2 m at the saved epoch 49: straight 95.0 to 79.3, turning 130.4 to 100.4, maneuvers 120.8 to 115.6, noisy 304.0 to 286.5, missed_30 154.1 to 146.0 (validation tracks, not the test seeds of section 7) |
+| `tracker/gru_numpy.py` | the trained GRU re-implemented in plain NumPy (the maths the browser runs), checked against PyTorch |
+| `export_model.py` | writes `web/model.js`, the trained GRU's weights as numbers for the browser |
+| `export_testvectors.py` | writes `web/testvectors.json`: fixed Python answers the JavaScript port is tested against |
+| `web/lab.js` | JavaScript port of the simulator, radar, Kalman filter, network features and GRU (used by the Random lab and by Node) |
+| `web/model.js` | generated by `export_model.py` (about 1.4 MB) |
+| `web/test_js.mjs` | `node web/test_js.mjs`: checks `lab.js` against Python's answers and the simulator statistically |
+| `tests/test_gru_numpy.py` | NumPy GRU equals PyTorch (plain/hybrid, 1/2 layers), hand-computed gate cases |
+| `tests/test_export_model.py` | the exported weights rebuild a model with the same outputs; rounding, shapes, size warning |
+| `tests/test_js_port.py` | the test vectors are what Python computes; runs the Node test when Node is installed |
 | `tests/test_tracker.py` | simulator and Kalman filter tests |
 | `tests/test_neural.py` | dataset, model save/load, zero-start and hybrid tests |
 | `tests/test_stats.py` | tests for the statistics helpers and the Kalman diagnostics |
@@ -1256,3 +1309,4 @@ One degree of latitude is 111,195 m. One degree of longitude is that times cos(3
 - [x] Multi-target tracking with clutter (gating, Hungarian assignment, M-of-N track management, OSPA)
 - [x] KalmanNet-style learned gain (works, beats a single Kalman filter in 4 of 5 scenarios, but loses to the IMM and the GRU and did not generalise better)
 - [x] Real ADS-B flight data (loader, evaluation and a first result on one real flight; the IMM is still best)
+- [x] Web demo: a replay of a recorded training run, and a Random lab that runs the Kalman filters and the trained GRU live in the browser (checked against Python, section 3.11)
