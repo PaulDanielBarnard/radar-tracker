@@ -87,6 +87,13 @@
   .row.best .val { color: var(--ink); font-weight: 700; }
   .note { color: var(--muted); font-size: 0.85rem; margin-top: 10px; }
 
+  .lab-grid { display: grid; grid-template-columns: 280px 1fr; gap: 16px; }
+  .lab-grid > div { min-width: 0; }
+  .lab-ctl label { display: block; font-size: 0.9rem; margin: 0 0 10px; }
+  .lab-ctl output { float: right; color: var(--muted); font-variant-numeric: tabular-nums; }
+  .lab-ctl input[type=range], .lab-ctl select { width: 100%; display: block; margin-top: 2px; }
+  .lab-btns { display: grid; gap: 8px; margin-top: 4px; }
+  #lab-canvas { height: 340px; }
   .learn-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; margin-top: 4px; }
   .learn-grid > div { min-width: 0; }
   #l-radar { height: 300px; }
@@ -103,6 +110,8 @@
     .row { grid-template-columns: 70px 1fr 60px; }
   }
   @media (max-width: 720px) {
+    .lab-grid { grid-template-columns: 1fr; }
+    #lab-canvas { height: 280px; }
     .learn-grid { grid-template-columns: 1fr; }
     #l-radar, #l-loss { height: 250px; }
   }
@@ -162,6 +171,46 @@
     <p class="note">Bars are capped at 700 m. A Kalman filter tuned for straight flight (q=0.1) is far worse than the raw radar in turns, which is why one fixed setting never wins everywhere. The GRU never saw these tracks during training.</p>
   </section>
 
+  <section class="panel" id="lab" aria-labelledby="lab-h" hidden>
+    <h2 id="lab-h">Random lab</h2>
+    <p class="sub">Make your own flight and radar. The Kalman filters and the trained GRU run live in your browser, on plots that were never in the training data or the results above.</p>
+    <div class="lab-grid">
+      <div class="lab-ctl">
+        <label>Range noise <output id="o-sr"></output><input id="c-sr" type="range" min="10" max="300" step="5" value="50"></label>
+        <label>Bearing noise <output id="o-st"></output><input id="c-st" type="range" min="1" max="30" step="1" value="5"></label>
+        <label>Missed scans <output id="o-miss"></output><input id="c-miss" type="range" min="0" max="60" step="5" value="10"></label>
+        <label>Manoeuvre intensity <output id="o-int"></output><input id="c-int" type="range" min="0.2" max="2" step="0.1" value="1"></label>
+        <label>Motion
+          <select id="c-motion"><option value="random" selected>Random manoeuvres</option><option value="straight">Straight line</option>
+            <option value="turn">Steady turn</option><option value="mix">Mix (picked at random)</option></select>
+        </label>
+        <div class="lab-btns">
+          <button id="b-gen" type="button">Generate random flight</button>
+          <button id="b-surprise" type="button">Surprise me</button>
+          <button id="b-mc" type="button">Run 20 random flights</button>
+        </div>
+        <p class="note" id="lab-warn" hidden>These settings are beyond what the GRU saw in training (noise up to 200 m and 0.02 rad, turn rate up to 0.05 rad/s), so expect it to struggle.</p>
+      </div>
+      <div>
+        <canvas id="lab-canvas" role="img" aria-label="Top-down view of your random flight: the true path, noisy radar plots, the Kalman filter and the GRU estimate"></canvas>
+        <div class="controls">
+          <button id="lab-play" type="button">Play</button>
+          <input id="lab-scrub" type="range" min="0" max="119" value="119" aria-label="Scan number">
+          <span id="lab-scan" class="sub" style="margin:0;min-width:7ch"></span>
+          <label class="sub" style="margin:0">Kalman q
+            <select id="lab-q" aria-label="Which Kalman setting to draw"><option value="0.1">0.1</option><option value="10">10</option><option value="100" selected>100</option></select>
+          </label>
+        </div>
+        <div class="legend small" id="lab-legend"></div>
+      </div>
+    </div>
+    <p class="sub" id="lab-info" style="margin-top:12px"></p>
+    <div class="cards" id="lab-cards"></div>
+    <h3 style="margin:16px 0 4px;font-size:0.95rem">20 random flights with these radar settings</h3>
+    <p class="sub" id="mc-status">Press "Run 20 random flights" for an average over many flights instead of one.</p>
+    <div class="bars" id="mc-bars"></div>
+  </section>
+
   <section class="panel" id="learn" aria-labelledby="learn-h" hidden>
     <h2 id="learn-h">How the GRU learns</h2>
     <p class="sub">A recorded training run, replayed. At epoch 0 the network is untrained and only gives its starting guess. Each epoch it sees more tracks and adjusts. Drag the slider or press play and watch the green line move toward the true path.</p>
@@ -196,6 +245,8 @@
 
 <script src="data.js"></script>
 <script src="training.js"></script>
+<script src="lab.js"></script>
+<script src="model.js"></script>
 <script>
 "use strict";
 (() => {
@@ -777,6 +828,184 @@
   matchMedia("(prefers-color-scheme: dark)").addEventListener("change", draw);
   setPlaying(false);
   draw();
+  requestAnimationFrame((t) => { last = t; frame(t); });
+})();
+</script>
+<script>
+"use strict";
+// "Random lab": simulate a flight and a radar in the browser (web/lab.js), run raw radar, three
+// Kalman filters and the trained GRU (web/model.js) on it. Hidden if either file is missing.
+(() => {
+  const Lab = window.Lab, M = window.GRU_MODEL, panel = document.getElementById("lab");
+  if (!panel || !Lab || !M) return;
+  panel.hidden = false;
+
+  const $ = (id) => document.getElementById(id);
+  const css = (name) => getComputedStyle(document.documentElement).getPropertyValue(name).trim();
+  const reduceMotion = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+  const BURN = (window.DEMO && window.DEMO.burnIn) || 10;
+  const QS = [0.1, 10, 100];
+  const METHODS = [["raw", "Raw radar", "--raw"], ["kf0.1", "Kalman q=0.1", "--kf"], ["kf10", "Kalman q=10", "--kf"],
+                   ["kf100", "Kalman q=100", "--kf"], ["gru", "GRU", "--gru"]];
+  const S = { flight: null, t: 119, playing: false, seed: 0 };
+  let last = 0;
+
+  const dist = (a, b) => Math.hypot(a[0] - b[0], a[1] - b[1]);
+  const clamp = (v, lo, hi) => Math.min(Math.max(v, lo), hi);
+
+  function settings() {
+    const intensity = +$("c-int").value;
+    return {
+      radar: { sigmaR: +$("c-sr").value, sigmaTheta: +$("c-st").value / 1000, pDetect: 1 - $("c-miss").value / 100, dt: 1 },
+      target: { ...Lab.TARGET, maxTurnRate: 0.05 * intensity, maxAccel: 5 * intensity },
+      motion: $("c-motion").value, intensity,
+    };
+  }
+
+  function showSettings() {
+    const s = settings();
+    $("o-sr").textContent = `${s.radar.sigmaR} m`;
+    $("o-st").textContent = `${s.radar.sigmaTheta.toFixed(3)} rad`;
+    $("o-miss").textContent = `${$("c-miss").value}%`;
+    $("o-int").textContent = `${s.intensity.toFixed(1)}×`;
+    $("lab-warn").hidden = !(s.radar.sigmaR > 200 || s.radar.sigmaTheta > 0.02 || s.intensity > 1);
+  }
+
+  // one flight: simulate, then run every method
+  function runFlight(seed, s) {
+    const rng = Lab.makeRng(seed);
+    const mode = s.motion === "mix" ? ["straight", "turn", "random"][rng.integers(0, 3)] : s.motion;
+    const track = Lab.simulateTrack(rng, mode, s.radar, s.target);
+    const T = track.truth.length, filled = Lab.forwardFill(track);
+    const est = { raw: filled };
+    for (const q of QS) est["kf" + q] = Lab.kalmanRun(track, q);
+    est.gru = Lab.gruRun(M, track);
+    const rmse = {};
+    for (const [key] of METHODS) {
+      let sum = 0, n = 0;
+      for (let k = BURN; k < T; k++) { sum += dist(est[key][k], track.truth[k]) ** 2; n++; }
+      rmse[key] = Math.sqrt(sum / n);
+    }
+    return { track, est, rmse, mode, seed };
+  }
+
+  // ---- drawing the flight ----
+  function fit(canvas) {
+    const dpr = window.devicePixelRatio || 1, w = canvas.clientWidth, h = canvas.clientHeight;
+    if (canvas.width !== Math.round(w * dpr) || canvas.height !== Math.round(h * dpr)) { canvas.width = Math.round(w * dpr); canvas.height = Math.round(h * dpr); }
+    const ctx = canvas.getContext("2d"); ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    return { ctx, w, h };
+  }
+
+  function drawFlight() {
+    const { ctx, w, h } = fit($("lab-canvas"));
+    ctx.clearRect(0, 0, w, h);
+    const F = S.flight; if (!F) return;
+    const tr = F.track, k = S.t;
+    let x0 = Infinity, x1 = -Infinity, y0 = Infinity, y1 = -Infinity;
+    for (const arr of [tr.truth, tr.xy]) for (const p of arr) if (p) { x0 = Math.min(x0, p[0]); x1 = Math.max(x1, p[0]); y0 = Math.min(y0, p[1]); y1 = Math.max(y1, p[1]); }
+    const pad = 28, sc = Math.min((w - 2 * pad) / Math.max(x1 - x0, 1), (h - 2 * pad) / Math.max(y1 - y0, 1));
+    const cx = (x0 + x1) / 2, cy = (y0 + y1) / 2, X = (p) => w / 2 + (p[0] - cx) * sc, Y = (p) => h / 2 - (p[1] - cy) * sc;
+    const line = (pts, color, lw, upto, dash, alpha) => {
+      ctx.strokeStyle = color; ctx.lineWidth = lw; ctx.globalAlpha = alpha; ctx.setLineDash(dash); ctx.lineJoin = "round";
+      ctx.beginPath(); for (let i = 0; i <= upto; i++) i ? ctx.lineTo(X(pts[i]), Y(pts[i])) : ctx.moveTo(X(pts[i]), Y(pts[i])); ctx.stroke();
+      ctx.setLineDash([]); ctx.globalAlpha = 1;
+    };
+    line(tr.truth, css("--truth"), 1, tr.truth.length - 1, [4, 5], 0.2);
+    ctx.fillStyle = css("--plots");
+    for (let i = 0; i <= k; i++) if (tr.xy[i]) { ctx.globalAlpha = i === k ? 1 : 0.6; ctx.beginPath(); ctx.arc(X(tr.xy[i]), Y(tr.xy[i]), 2.6, 0, 7); ctx.fill(); }
+    ctx.globalAlpha = 1;
+    line(tr.truth, css("--truth"), 1.8, k, [], 0.9);
+    const q = $("lab-q").value;
+    line(F.est["kf" + q], css("--kf"), 2.2, k, [], 1);
+    line(F.est.gru, css("--gru"), 2.2, k, [], 1);
+    for (const [pts, c] of [[F.est["kf" + q], "--kf"], [F.est.gru, "--gru"], [tr.truth, "--truth"]]) {
+      ctx.fillStyle = css(c); ctx.beginPath(); ctx.arc(X(pts[k]), Y(pts[k]), 4.5, 0, 7); ctx.fill();
+    }
+    const steps = [100, 200, 500, 1000, 2000, 5000, 10000, 20000], target = (w * 0.22) / sc;
+    const len = steps.filter((m) => m <= target).pop() || 100, px = len * sc;
+    ctx.strokeStyle = css("--muted"); ctx.fillStyle = css("--muted"); ctx.lineWidth = 2;
+    ctx.beginPath(); ctx.moveTo(w - 14 - px, h - 14); ctx.lineTo(w - 14, h - 14); ctx.stroke();
+    ctx.font = "12px system-ui, sans-serif"; ctx.textAlign = "right"; ctx.fillText(len >= 1000 ? `${len / 1000} km` : `${len} m`, w - 14, h - 20);
+  }
+
+  function showFlight() {
+    const F = S.flight; if (!F) return;
+    $("lab-scan").textContent = `scan ${S.t + 1}/${F.track.truth.length}`;
+    $("lab-scrub").value = S.t;
+    const best = Math.min(...METHODS.map(([key]) => F.rmse[key]));
+    $("lab-cards").innerHTML = METHODS.map(([key, name, col]) =>
+      `<div class="card"><div class="name"><span class="sw" style="background:var(${col})"></span>${name}</div>
+        <div class="big">${Math.round(F.rmse[key])} m${F.rmse[key] === best ? " ★" : ""}</div><div class="small">average error, whole flight</div></div>`).join("");
+    drawFlight();
+  }
+
+  function newFlight(seed) {
+    S.seed = seed; S.flight = runFlight(seed, settings());
+    const nm = Math.round(S.flight.track.detected.filter((d) => !d).length);
+    S.t = reduceMotion ? S.flight.track.truth.length - 1 : 0; S.playing = !reduceMotion; $("lab-play").textContent = S.playing ? "Pause" : "Play";
+    $("lab-info").textContent = `Flight #${seed} (${S.flight.mode}), ${nm} of ${S.flight.track.truth.length} scans missed. The same number always gives the same flight.`;
+    showFlight();
+  }
+
+  // ---- 20 random flights ----
+  let mcRun = 0;
+  function runMonteCarlo() {
+    const my = ++mcRun, s = settings(), base = Math.floor(Math.random() * 1e6), N = 20, results = METHODS.map(() => []);
+    $("b-mc").disabled = true;
+    let i = 0;
+    const step = () => {
+      if (my !== mcRun) return;
+      const f = runFlight(base + i, s);
+      METHODS.forEach(([key], j) => results[j].push(f.rmse[key]));
+      i++;
+      $("mc-status").textContent = `Running flight ${i} of ${N}…`;
+      if (i < N) { setTimeout(step, 0); return; }
+      $("b-mc").disabled = false;
+      $("mc-status").textContent = `Average error over ${N} random flights (radar noise ${s.radar.sigmaR} m / ${s.radar.sigmaTheta.toFixed(3)} rad, ${Math.round((1 - s.radar.pDetect) * 100)}% missed, motion: ${s.motion}). Lower is better; ± is a 95% interval over flights.`;
+      const stats = results.map((r) => { const m = r.reduce((a, b) => a + b, 0) / N, sd = Math.sqrt(r.reduce((a, b) => a + (b - m) ** 2, 0) / (N - 1)); return { m, ci: 1.96 * sd / Math.sqrt(N) }; });
+      const cap = Math.max(...stats.map((x) => x.m)) * 1.05, min = Math.min(...stats.map((x) => x.m));
+      $("mc-bars").innerHTML = `<div class="group">` + METHODS.map(([, name, col], j) =>
+        `<div class="row${stats[j].m === min ? " best" : ""}"><span>${name}</span><span class="track"><span class="fill" style="display:block;width:${stats[j].m / cap * 100}%;background:var(${col})"></span></span>
+          <span class="val">${Math.round(stats[j].m)} ± ${Math.round(stats[j].ci)} m${stats[j].m === min ? " ★" : ""}</span></div>`).join("") + `</div>`;
+    };
+    setTimeout(step, 0);
+  }
+
+  // ---- wiring ----
+  const newSeed = () => 1 + Math.floor(Math.random() * 999999);
+  for (const id of ["c-sr", "c-st", "c-miss", "c-int"]) $(id).addEventListener("input", showSettings);
+  $("b-gen").addEventListener("click", () => newFlight(newSeed()));
+  $("b-surprise").addEventListener("click", () => {          // completely random settings and motion
+    const pick = (lo, hi, step) => lo + Math.round(Math.random() * (hi - lo) / step) * step;
+    $("c-sr").value = pick(10, 300, 5); $("c-st").value = pick(1, 30, 1); $("c-miss").value = pick(0, 60, 5);
+    $("c-int").value = pick(0.2, 2, 0.1).toFixed(1); $("c-motion").value = ["random", "straight", "turn", "mix"][Math.floor(Math.random() * 4)];
+    showSettings(); newFlight(newSeed());
+  });
+  $("b-mc").addEventListener("click", runMonteCarlo);
+  $("lab-q").addEventListener("change", drawFlight);
+  $("lab-scrub").addEventListener("input", (e) => { S.playing = false; $("lab-play").textContent = "Play"; S.t = +e.target.value; showFlight(); });
+  $("lab-play").addEventListener("click", () => {
+    if (!S.flight) return;
+    if (S.t >= S.flight.track.truth.length - 1) S.t = 0;
+    S.playing = !S.playing; $("lab-play").textContent = S.playing ? "Pause" : "Play"; showFlight();
+  });
+  $("lab-legend").innerHTML = [["--truth", "True path"], ["--plots", "Radar plots"], ["--kf", "Kalman filter"], ["--gru", "GRU (trained on simulated flights)"]]
+    .map(([c, t]) => `<span><i class="sw" style="background:var(${c})"></i>${t}</span>`).join("");
+  let acc = 0;
+  function frame(now) {
+    const dt = Math.min((now - last) / 1000, 0.1); last = now;
+    if (S.playing && S.flight) {
+      acc += dt * 20; const n = Math.floor(acc); acc -= n;
+      S.t = Math.min(S.t + n, S.flight.track.truth.length - 1);
+      if (S.t >= S.flight.track.truth.length - 1) { S.playing = false; $("lab-play").textContent = "Replay"; }
+      if (n) showFlight();
+    }
+    requestAnimationFrame(frame);
+  }
+  $("theme").addEventListener("click", drawFlight);
+  window.addEventListener("resize", drawFlight);
+  showSettings(); newFlight(1);
   requestAnimationFrame((t) => { last = t; frame(t); });
 })();
 </script>
