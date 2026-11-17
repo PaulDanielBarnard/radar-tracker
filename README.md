@@ -573,6 +573,7 @@ can differ slightly.
 | `tests/test_gru_numpy.py` | NumPy GRU equals PyTorch (plain/hybrid, 1/2 layers), hand-computed gate cases |
 | `tests/test_export_model.py` | the exported weights rebuild a model with the same outputs; rounding, shapes, size warning |
 | `tests/test_js_port.py` | the test vectors are what Python computes; runs the Node test when Node is installed |
+| `tests/test_imm_input.py` | the `--imm` inputs: feature counts, IMM columns and mode probabilities, unchanged Kalman features, untrained model equals the IMM, a tiny training run |
 | `tests/test_tracker.py` | simulator and Kalman filter tests |
 | `tests/test_neural.py` | dataset, model save/load, zero-start and hybrid tests |
 | `tests/test_stats.py` | tests for the statistics helpers and the Kalman diagnostics |
@@ -904,6 +905,31 @@ Paired differences (negative = the first has less error), normal radar then nois
   same in every repeat, so the intervals show **radar luck only**, not how other flights would differ. The
   file comes from an incident extract: it is raw sensor data and says nothing about the cause of the accident,
   and nothing here should be read as saying anything about it. A busier, multi-aircraft file would be the next step.
+
+### 7.8 Giving the GRU the IMM's answer (`python train_neural.py --imm --name gru_imm`)
+
+In every table above the IMM beat the GRU. The obvious fix is to stop making the network re-discover what
+the IMM already knows: with `--imm` the network also receives the IMM's position, velocity and its four
+mode probabilities (27 inputs instead of 19), and it learns a *correction to the IMM* instead of to a
+Kalman filter. Training stopped early at epoch 33 (validation error 155.3 m, against 163.2 m for the plain
+hybrid GRU trained for the demo). Test result, 5 seeds x 100 tracks per scenario, mean RMSE in metres
+(`python run_eval.py --seeds 5 --tracks 100 --model gru_imm`, the same seeds for both GRUs):
+
+| scenario | best Kalman | IMM | plain hybrid GRU | GRU fed the IMM | GRU - IMM (paired) |
+|---|---|---|---|---|---|
+| straight | 56.4 (q=0.1) | 69.2 | 80.9 | 69.3 | +0.1 +/- 0.3 (no clear difference) |
+| turning | 130.3 (q=100) | 93.8 | 102.0 | 85.6 | -8.2 +/- 1.9 (GRU better) |
+| maneuvers | 116.0 (q=100) | 107.7 | 112.3 | 107.0 | -0.6 +/- 0.5 |
+| noisy | 289.0 (q=100) | 266.9 | 281.0 | 265.5 | -1.4 +/- 0.9 |
+| missed_30 | 143.4 (q=100) | 133.2 | 140.9 | 132.3 | -0.9 +/- 0.7 |
+
+**Reading it honestly.** The GRU now matches or beats the IMM everywhere, but only clearly in turning
+(about 9% lower). In the other three scenarios the gain is about 1 m, with intervals that barely exclude
+zero, and on straight flight it is level with the IMM and still 12.9 m behind the Kalman filter with
+q=0.1. It also is not an independent win: the network starts from the IMM and adds a correction, so this
+is "IMM plus a learned fix", not a network that out-tracks the classical filter alone. Open questions: this
+is one training run (no repeats), only 5 x 100 test tracks, not the 10 x 200 of section 7.1, and the
+browser demo still uses the plain hybrid GRU (the JavaScript port has no IMM).
 
 ## 8. Lessons learned
 
