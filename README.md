@@ -54,6 +54,8 @@ python -m pytest                       # all tests should pass
 | `python train_neural.py` | trains the recommended GRU (hybrid, randomised radar, hidden 128, 2 layers, 50 epochs) and saves `outputs/gru_tracker.pt` | about 5 minutes on a laptop CPU |
 | `python run_compare.py` | one table: raw radar vs Kalman vs IMM vs GRU (needs the trained model) | a few minutes |
 | `python run_eval.py` | the same comparison over 10 random seeds with confidence intervals and a filter-consistency check | about 30 minutes (`--seeds 2 --tracks 30` for a quick look) |
+| `python train_kalmannet.py` | trains the learned-gain filter (section 3.9) and saves `outputs/kalmannet.pt`; `run_compare.py` and `run_eval.py` include it automatically once it exists | about 10 minutes |
+| `python run_eval.py --stress` | only the very noisy radar (300 m, 0.03 rad) that is beyond the training range | about 10 minutes |
 | `python run_multitarget.py` | the multi-target tracker on 1, 3 and 6 aircraft among 0, 5 and 20 false plots per scan, scored with OSPA | about 6 minutes (`--scenes 2` for a quick look) |
 | `python export_demo.py` | bakes example tracks and results into `web/data.js` | a minute or two |
 | `python -m http.server 8000 -d web` | serves the demo page at http://localhost:8000 | instant |
@@ -398,6 +400,49 @@ aircraft at 0 m and 5,000 m, and one track 100 m from the first:
 
 A perfect tracker scores 0, and one that finds nothing scores 1000.
 
+### 3.9 A learned gain (`tracker/kalmannet.py`, `train_kalmannet.py`)
+
+**The idea.** The hybrid GRU (section 3.6) learns a free-form correction to a Kalman estimate.
+A **learned-gain filter** (KalmanNet style) keeps the Kalman filter's skeleton and learns only
+the **gain** `K`, the number that decides how far to move toward each plot:
+
+```
+predict    x_pred = F x                           fixed physics: constant velocity, as in section 3.4
+innovate   y      = plot - position of x_pred     how surprised are we?
+correct    x      = x_pred + K y                  K is chosen by a small GRU, every scan
+```
+
+The motion model stays fixed, so only one thing is learned. The hope was that this would hold up
+better on conditions the network never saw than a network that outputs positions freely.
+
+**What the network reads each scan:** the innovation `y`, its own previous correction, whether a
+plot arrived, how many scans ago the last one was, the range, and the radar's noise levels (the
+things a Kalman filter also knows). On a missed scan there is no innovation, so the filter coasts.
+
+**A bounded gain, and a lesson.** The plan was a free 4x2 gain matrix. With random weights it
+diverged (the error reached 10^27): a gain that mixes the x and y axes, or whose velocity part has
+the wrong sign, can make the filter unstable even when every number stays bounded. The final
+design is the classic **alpha-beta filter**, one **position gain** `alpha` in (0, 1) and one
+**velocity gain** `beta` in (0, 0.5) per axis (both from a sigmoid):
+
+```
+K = [[alpha_x, 0], [0, alpha_y], [beta_x, 0], [0, beta_y]]
+```
+
+For every `alpha` and `beta` in that range the filter is stable, and a test checks the whole
+range numerically. The price is that the network cannot ask for a gain outside it.
+
+**It starts as a real filter.** The output layer starts at zero with its bias set to the steady-state
+gain of an ordinary `q = 100` Kalman filter: `alpha` = 0.282 and `beta` = 0.0466 (checked by running
+the code). So before any training it is a working fixed-gain filter. Worked example: predicted
+position 1,200 m, plot at 1,260 m, so `y` = 60 m. New position = 1,200 + 0.282 x 60 = **1,216.9 m**,
+and the velocity estimate rises by 0.0466 x 60 = **2.8 m/s**.
+
+**Training** (`train_kalmannet.py`) mirrors the GRU's: random radar settings, separate validation
+tracks, the noise-balanced position loss, early stopping, and gradient clipping (the filter loop is
+120 steps long, so gradients can blow up). It has 15,044 parameters, about a tenth of the 156,546 in
+the hybrid GRU.
+
 ## 4. Project map
 
 | Path | Purpose |
@@ -413,12 +458,14 @@ A perfect tracker scores 0, and one that finds nothing scores 1000.
 | `tracker/scenarios.py` | the five test scenarios, the Kalman `q` values, and `random_radar` for training |
 | `tracker/dataset.py` | turns tracks into tensors for the network; the input features; hybrid features |
 | `tracker/neural.py` | the GRU tracker, plus save and load of models together with their settings |
+| `tracker/kalmannet.py` | the learned-gain Kalman filter (a GRU outputs a bounded alpha-beta gain), its steady-state starting gain, save and load |
 | `tracker/stats.py` | confidence intervals, paired differences, NEES, chi-squared bounds |
 | `tracker/paths.py` | where `outputs/` and the model files live |
 | `run_baseline.py` | table of Kalman settings vs raw radar, plus two plots in `outputs/` |
 | `train_neural.py` | trains the GRU and prints a per-scenario report |
-| `run_compare.py` | one table: raw radar, Kalman, IMM, GRU on seed-42 test tracks |
-| `run_eval.py` | multi-seed evaluation of raw radar, Kalman, IMM and GRU: confidence intervals, paired verdicts, filter consistency |
+| `train_kalmannet.py` | trains the learned-gain filter and prints a per-scenario report |
+| `run_compare.py` | one table: raw radar, Kalman, IMM, GRU (and the learned-gain filter if trained) on seed-42 test tracks |
+| `run_eval.py` | multi-seed evaluation of raw radar, Kalman, IMM, GRU and the learned-gain filter: confidence intervals, paired verdicts, filter consistency; `--stress` for the very noisy radar |
 | `run_multitarget.py` | multi-target evaluation: aircraft counts x clutter rates, scored with OSPA and the confirmed-track count |
 | `export_demo.py` | writes `web/data.js` (example tracks and results) for the demo page |
 | `web/index.html` | the demo page: radar (PPI) view, close-up view, results bars |
@@ -615,9 +662,22 @@ During development a plain GRU (no Kalman inputs) was tested on a very noisy rad
 beyond anything it trained on (300 m range noise, 0.03 rad bearing noise). Both the
 fixed-scenario and the randomised plain GRU did badly there (about 670 m), losing to a
 Kalman filter with q=100 (about 523 m). The **hybrid** GRU, which starts from a Kalman
-estimate, got 503.9 m. (That experiment used a throwaway script that is not part of the
-repository.) Lesson: a learned tracker is only as good as the conditions it has seen, and
-building a physical model into it helps it fail more gracefully.
+estimate, got 503.9 m. (That first experiment used a throwaway script that is not part of the
+repository.) The same test is now repeatable with `python run_eval.py --stress` (10 seeds of
+200 tracks, random maneuvers; training never went above 200 m and 0.02 rad):
+
+| method | position error (m) |
+|---|---|
+| raw radar | 1212.4 ± 21.0 |
+| KF q=0.1 / 1 / 10 | 2024.0 ± 89.5 / 1437.1 ± 57.6 / 840.5 ± 29.4 |
+| KF q=100 | 522.8 ± 9.0 |
+| IMM | **482.2 ± 7.2** |
+| hybrid GRU | 502.6 ± 7.8 |
+| learned-gain filter (section 3.9) | 559.0 ± 8.4 |
+
+Lesson: a learned tracker is only as good as the conditions it has seen, and building a physical
+model into it helps it fail more gracefully (the hybrid GRU still beats the best single Kalman
+filter here). The learned-gain filter was expected to be the most robust and was **not**: see 7.6.
 
 ### 7.4 Why two seeds were not enough
 
@@ -659,6 +719,44 @@ maneuvers, each detected with probability 0.9 per scan. The first 10 scans are s
   test of crossing or very close targets, where association is hardest. The tracker uses one Kalman
   `q` for everything (the IMM could be plugged in per track, but is not).
 
+### 7.6 The learned-gain filter (`python run_eval.py`, with `outputs/kalmannet.pt` trained)
+
+Same 10 seeds of 200 tracks as 7.1. Position RMSE in metres (the filter trained for 40 epochs):
+
+| scenario | best single Kalman | IMM | hybrid GRU | learned-gain filter |
+|---|---|---|---|---|
+| straight | **57.6** (q=0.1) | 70.2 | 81.7 | 107.7 ± 0.9 |
+| turning | 134.6 (q=100) | **95.6** | 104.9 | 120.8 ± 1.5 |
+| maneuvers | 118.7 (q=100) | **111.1** | 113.6 | 116.7 ± 1.8 |
+| noisy | 297.8 (q=100) | **275.4** | 286.2 | 288.6 ± 4.3 |
+| missed_30 | 146.4 (q=100) | **136.5** | 141.6 | 144.3 ± 1.7 |
+
+Paired differences for the learned-gain filter (negative = it has less error):
+
+| scenario | minus IMM (m) | minus GRU (m) | minus best Kalman (m) |
+|---|---|---|---|
+| straight | +37.5 ± 0.7 | +26.0 ± 0.6 | +50.1 ± 0.8 |
+| turning | +25.3 ± 1.2 | +15.9 ± 0.8 | **-13.8 ± 1.0** |
+| maneuvers | +5.6 ± 0.6 | +3.2 ± 0.6 | **-2.0 ± 0.6** |
+| noisy | +13.2 ± 1.2 | +2.4 ± 1.9 | **-9.2 ± 3.4** |
+| missed_30 | +7.8 ± 0.8 | +2.7 ± 1.0 | **-2.1 ± 1.0** |
+
+**Reading it, honestly.**
+- **It does not beat the IMM or the GRU anywhere.** Every one of those intervals excludes zero, in
+  the wrong direction for the learned-gain filter.
+- **It does beat the best single Kalman filter in four of five scenarios** (13.8 m better in turns), because
+  it can raise its gain when the target turns. On straight flight it loses clearly: the training
+  mixes all kinds of motion and radar, and the trained gain smooths less than q=0.1.
+- **The hoped-for robustness did not appear.** On the very noisy radar (section 7.3) it scored 559.0 m,
+  worse than the q=100 Kalman filter (522.8 m), the GRU (502.6 m) and the IMM (482.2 m), each by a clear
+  margin. Likely reasons (**guesses, not tested**): its gain is capped at the range needed for the
+  training radars, training noise stopped at 200 m, and its inputs are scaled by fixed constants chosen for
+  normal conditions.
+- **It has no covariance, so no NEES.** Like the GRU, it cannot say how sure it is.
+- **What it is good for.** It is small (15,044 parameters), always stable, and starts as a working filter,
+  but here a good classical IMM beat it. A negative result: keep the idea, but do not expect it to win
+  without more work (a wider training range, or learning the gain *and* the process noise).
+
 ## 8. Lessons learned
 
 - **A units bug hid in plain sight.** The training loss averaged the squared error over the
@@ -696,6 +794,12 @@ maneuvers, each detected with probability 0.9 per scan. The first 10 scans are s
   shared its plots for the rest of the flight, so one aircraft showed up as two tracks. Only a test
   with two aircraft and no clutter exposed it. The fixes were to never start a track from a plot
   inside an existing gate and to merge tracks whose position and velocity agree.
+- **Bounded outputs are not the same as a stable system.** The first learned-gain design kept every
+  output inside sensible limits and still diverged to 10^27, because a feedback loop (the gain acts on
+  its own past errors) can be unstable for gains that each look reasonable. The fix was to use a gain
+  structure that is provably stable (alpha-beta) and to test the whole range numerically.
+- **A plausible idea can fail its own test.** "Keep the physics and learn only the gain, so it
+  generalises better" is a sensible hypothesis. The stress test said no, so the README says no.
 - **A negative result is still a result.** "Training longer does not help" saved time and
   pointed at the real limits.
 - **Pairing, many seeds and consistency checks changed what we could claim.** The small wins
@@ -751,6 +855,10 @@ maneuvers, each detected with probability 0.9 per scan. The first 10 scans are s
 | M-of-N confirmation | the rule "M hits within N scans" that keeps false alarms out of the answer |
 | coasting | predicting without a plot while a track misses scans |
 | ghost track | a reported track that matches no real aircraft |
+| learned gain (KalmanNet style) | a Kalman filter whose gain `K` is chosen by a small network each scan, with the motion model fixed |
+| alpha-beta filter | a filter with one position gain (alpha) and one velocity gain (beta) per axis; stable for alpha in (0, 1) and small positive beta |
+| steady-state gain | the gain a Kalman filter settles to after many scans with the same noise |
+| generalisation | how well a method works on conditions it was not trained or tuned on |
 | OSPA | a distance between a set of true positions and a set of tracks, counting wrong positions and the wrong count |
 | localisation / cardinality | the two parts of OSPA: how far paired tracks are off, and the cost of the wrong number of tracks |
 
@@ -952,14 +1060,38 @@ on the same aircraft, and the two tracks then shared its plots. Fixes: no new tr
 track's gate, and merge tracks whose position and velocity agree.
 </details>
 
+<details><summary><b>32.</b> How does the learned-gain filter differ from the hybrid GRU?</summary>
+
+The hybrid GRU outputs a free-form correction to a Kalman position. The learned-gain filter keeps the
+Kalman structure (predict, then add `K` times the innovation) and the network only chooses the gain `K`.
+The physics is fixed and only one thing is learned.
+</details>
+
+<details><summary><b>33.</b> Why was the gain limited to an alpha-beta form with alpha in (0, 1) and beta in (0, 0.5)?</summary>
+
+A freely chosen 4x2 gain diverged with random weights, even though every number was bounded: the gain feeds
+back on the filter's own errors, so some gains make it unstable. The alpha-beta form is stable for every
+gain in that range (checked numerically on a grid), so training cannot push the filter into instability.
+</details>
+
+<details><summary><b>34.</b> Predicted position 1,200 m, plot 1,260 m, alpha = 0.282, beta = 0.0466. What are the new position and the velocity change?</summary>
+
+Position: 1,200 + 0.282 x 60 = 1,216.9 m. Velocity estimate: + 0.0466 x 60 = + 2.8 m/s.
+</details>
+
+<details><summary><b>35.</b> The learned-gain filter beat the best single Kalman filter in four scenarios, yet it is not a success. Why?</summary>
+
+It lost to the IMM and the GRU in every scenario, and on a radar noisier than any it trained on it was worse than
+the plain q=100 Kalman filter. The hope that learning only the gain would generalise better was not supported.
+</details>
+
 ## 11. Roadmap and further reading
 
-**Where the project could go next** (the IMM filter and multi-target tracking are done, see sections 3.7, 3.8 and 7)
+**Where the project could go next** (the IMM filter, multi-target tracking and the learned gain are done, see sections 3.7, 3.8, 3.9 and 7)
 - **Harder multi-target cases:** crossing and very close aircraft, an IMM inside every track, and
   track-to-track swaps scored explicitly.
-- **A learned gain (KalmanNet style):** keep the Kalman predict-and-update structure but let a
-  small GRU output the gain, so the physics stays fixed and only the gain is learned. It
-  should hold up better outside the training range than a free-form GRU.
+- **A better learned gain:** the first version (section 3.9) did not generalise (section 7.6). Ideas:
+  train on a wider noise range, also learn the process noise, or give it the IMM's mode probabilities.
 - **Real flight data:** ADS-B tracks (for example from the OpenSky Network) with simulated radar
   noise added, in place of invented maneuvers.
 - **Notebooks only for exploring:** keep the code in the `tracker/` package and its tests, and use
@@ -983,5 +1115,5 @@ track's gate, and merge tracks whose position and velocity agree.
 - [x] Rigorous evaluation: many seeds, confidence intervals, paired comparison, NEES and NIS
 - [x] IMM filter as a stronger classical baseline (it beat the GRU in every scenario)
 - [x] Multi-target tracking with clutter (gating, Hungarian assignment, M-of-N track management, OSPA)
-- [ ] KalmanNet-style learned gain
+- [x] KalmanNet-style learned gain (works, beats a single Kalman filter in 4 of 5 scenarios, but loses to the IMM and the GRU and did not generalise better)
 - [ ] Real ADS-B flight data
