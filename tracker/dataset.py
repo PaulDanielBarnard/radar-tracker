@@ -15,8 +15,26 @@ HYBRID_BASE_Q = 100.0       # the filter whose position the network corrects
 N_KF_FEATURES = 4 * len(HYBRID_QS)
 
 
-def n_features(hybrid: bool) -> int:
-    return N_FEATURES + (N_KF_FEATURES if hybrid else 0)
+N_IMM_FEATURES = 4 + 4      # IMM: position vs latest plot (2), velocity (2), mode probabilities (4)
+
+
+def n_features(hybrid) -> int:
+    """hybrid: False (plain), True (Kalman inputs) or "imm" (Kalman inputs plus the IMM filter's output)."""
+    if not hybrid:
+        return N_FEATURES
+    return N_FEATURES + N_KF_FEATURES + (N_IMM_FEATURES if hybrid == "imm" else 0)
+
+
+def imm_features(track, filled):
+    """Run the tuned IMM filter. Returns (extra feature columns, the IMM's position estimate).
+
+    The columns are the IMM position relative to the latest plot, its velocity, and the probability
+    it gives each of its four motion models. The network can use the IMM as an expert opinion.
+    """
+    from .imm import default_imm            # local import: imm does not need torch or this module
+    est, diag = default_imm().run(track, return_diag=True)
+    cols = [(est[:, :2] - filled) / OUT_SCALE, est[:, 2:4] / VEL_SCALE, diag["mu"]]
+    return np.concatenate(cols, axis=1), est[:, :2]
 
 
 def kalman_features(track, filled):
@@ -66,7 +84,10 @@ def track_to_arr(track, hybrid=False):
     if hybrid:                                   # start from a Kalman filter instead
         extra, base = kalman_features(track, filled)
         feat = np.concatenate([feat, extra], axis=1)
-   
+        if hybrid == "imm":                      # also show the network the IMM, and correct the IMM instead
+            extra, base = imm_features(track, filled)
+            feat = np.concatenate([feat, extra], axis=1)
+
     return feat, base, track.truth[:, :2]
 
 

@@ -151,6 +151,9 @@ def build_parser() -> argparse.ArgumentParser:
     ap.add_argument("--patience", type = int, default = 8, help = "stop after this many epochs without improvement (0 = never)")
     ap.add_argument("--hybrid", action = argparse.BooleanOptionalAction, default = True,
                     help = "start from a Kalman filter and learn a correction (default on; --no-hybrid turns it off)")
+    ap.add_argument("--imm", action = "store_true",
+                    help = "also feed the network the IMM filter's output and correct the IMM instead of the "
+                           "Kalman filter (experimental; training data takes a few minutes longer to build)")
     ap.add_argument("--randomize", action = argparse.BooleanOptionalAction, default = True,
                     help = "train on random radar settings (default on; --no-randomize uses the five fixed scenarios)")
     ap.add_argument("--name", default = "gru_tracker", help = "checkpoint name in outputs/")
@@ -161,6 +164,8 @@ def build_parser() -> argparse.ArgumentParser:
 
 def main(argv = None):
     args = build_parser().parse_args(argv)
+    if args.imm:
+        args.hybrid = "imm"      # the model's `hybrid` setting says which inputs it expects
     OUT_DIR.mkdir(exist_ok = True)
     ckpt = checkpoint(args.name)
     torch.manual_seed(0)
