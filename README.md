@@ -510,14 +510,16 @@ Open the page with `python -m http.server 8000 -d web`. It has four parts, top t
 3. **How the GRU learns.** A recorded 50-epoch training run (`web/training.js`) replayed epoch by epoch.
    Drag the slider (or press play): the green line moves from the network's *starting guess* (epoch 0,
    the Kalman base position) toward the true path, the loss chart gets a cursor, and the bars show the
-   GRU's validation error against raw radar and the best Kalman filter. Real numbers from that run
+   GRU's validation error against raw radar, the best Kalman filter and the IMM filter (an untrained
+   comparison line, amber, also drawn on the mini radar). Real numbers from that run
    (validation tracks, not the test seeds of section 7): average error over the five scenarios fell from
    177.1 m to 163.2 m at the saved epoch 49. If `training.js` is missing the panel hides itself.
 4. **Random lab.** Choose the radar noise, the missed scans, the motion and how hard it manoeuvres, or press
    *Surprise me*, and the page simulates a brand-new flight and runs raw radar, three Kalman filters (q=0.1,
    10, 100), the IMM filter, the trained GRU, KalmanNet and the GRU fed the IMM **live in JavaScript** (eight
    methods; a flight takes about 0.25 s). "Also draw" picks which of the IMM, KalmanNet or IMM-fed GRU is
-   drawn next to the Kalman filter and the GRU. *Run 20 random flights* averages over many flights
+   drawn next to the Kalman filter and the GRU, and the legend follows that choice. The three Kalman filters
+   are shaded differently in the cards and bars. *Run 20 random flights* averages over many flights
    (shown with a 95% interval over flights). Settings beyond the training range (noise above 200 m or 0.02 rad,
    manoeuvres above 1x) show a warning, because the GRU has never seen them.
 
