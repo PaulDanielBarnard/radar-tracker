@@ -140,6 +140,80 @@
     return est;
   }
 
+  // ---- the IMM filter (tracker/imm.py): four motion models, a belief about which one fits ----
+  const TUNED_MODELS = [["cv", 1], ["cv", 100], ["ct", 0.05, 10], ["ct", -0.05, 10]];
+  const TUNED_STAY = 0.98, PROB_FLOOR = 1e-12;
+  const scale = (A, s) => A.map((row) => row.map((v) => v * s));
+  const outer = (a, b) => a.map((u) => b.map((v) => u * v));
+  const sumMats = (list) => list.reduce((acc, M) => add(acc, M));
+  const zeros4 = () => Array.from({ length: 4 }, () => [0, 0, 0, 0]);
+
+  // kalman.ct_matrices: the velocity vector turns at omega rad/s, same noise as constant velocity
+  function ctMatrices(omega, q, dt) {
+    if (Math.abs(omega * dt) < 1e-9) return cvMatrices(q, dt);
+    const s = Math.sin(omega * dt), c = Math.cos(omega * dt);
+    const F = [[1, 0, s / omega, -(1 - c) / omega], [0, 1, (1 - c) / omega, s / omega], [0, 0, c, -s], [0, 0, s, c]];
+    return [F, cvMatrices(q, dt)[1]];
+  }
+
+  function kalmanUpdate(x, P, z, R) {                       // kalman.update; also returns innovation y and S
+    const S = [[P[0][0] + R[0][0], P[0][1] + R[0][1]], [P[1][0] + R[1][0], P[1][1] + R[1][1]]];
+    const det = S[0][0] * S[1][1] - S[0][1] * S[1][0];
+    const Si = [[S[1][1] / det, -S[0][1] / det], [-S[1][0] / det, S[0][0] / det]];
+    const K = mm(P.map((row) => [row[0], row[1]]), Si);
+    const y = [z[0] - x[0], z[1] - x[1]];
+    const xn = x.map((v, i) => v + K[i][0] * y[0] + K[i][1] * y[1]);
+    const KH = K.map((row) => [row[0], row[1], 0, 0]);
+    return { x: xn, P: mm(eye(4).map((row, i) => row.map((v, j) => v - KH[i][j])), P), y, S, det, Si };
+  }
+
+  // imm._combine, state only (the page does not need the combined covariance)
+  const combineMean = (xs, w) => [0, 1, 2, 3].map((i) => xs.reduce((s, xj, j) => s + w[j] * xj[i], 0));
+
+  // Returns { est: [[x, y, vx, vy]...], mu: [[p1..p4]...] }
+  function immRun(track, models, stay, initSpeedStd) {
+    models = models || TUNED_MODELS; stay = stay === undefined ? TUNED_STAY : stay;
+    initSpeedStd = initSpeedStd === undefined ? 200 : initSpeedStd;
+    const radar = track.radar, M = models.length;
+    const mats = models.map((m) => (m[0] === "cv" ? cvMatrices(m[1], radar.dt) : ctMatrices(m[1], m[2], radar.dt)));
+    const pi = Array.from({ length: M }, (_, i) => Array.from({ length: M }, (_, j) => (i === j ? stay : (1 - stay) / (M - 1))));
+    const [r0, th0] = track.polar[0], R0 = polarToCartCov(r0, th0, radar.sigmaR, radar.sigmaTheta);
+    const x0 = [track.xy[0][0], track.xy[0][1], 0, 0];
+    const P0 = [[R0[0][0], R0[0][1], 0, 0], [R0[1][0], R0[1][1], 0, 0], [0, 0, initSpeedStd ** 2, 0], [0, 0, 0, initSpeedStd ** 2]];
+    let xs = models.map(() => x0.slice()), Ps = models.map(() => P0.map((r) => r.slice()));
+    let mu = new Array(M).fill(1 / M);
+    const est = [x0.slice()], mus = [mu.slice()];
+    for (let k = 1; k < track.detected.length; k++) {
+      // 1. mix
+      const c = Array.from({ length: M }, (_, j) => mu.reduce((s, m, i) => s + pi[i][j] * m, 0));
+      const muIJ = (i, j) => pi[i][j] * mu[i] / c[j];
+      const mx = [], mP = [];
+      for (let j = 0; j < M; j++) {
+        const xm = [0, 1, 2, 3].map((d) => xs.reduce((s, xi, i) => s + muIJ(i, j) * xi[d], 0));
+        mx.push(xm);
+        mP.push(sumMats(xs.map((xi, i) => scale(add(Ps[i], outer(xi.map((v, d) => v - xm[d]), xi.map((v, d) => v - xm[d]))), muIJ(i, j)))));
+      }
+      // 2. predict every model
+      xs = mx.map((x, j) => mv(mats[j][0], x));
+      Ps = mP.map((P, j) => add(mm(mm(mats[j][0], P), tr(mats[j][0])), mats[j][1]));
+      if (track.detected[k]) {
+        const [r, th] = track.polar[k], R = polarToCartCov(r, th, radar.sigmaR, radar.sigmaTheta), z = track.xy[k];
+        const logw = [];
+        for (let j = 0; j < M; j++) {                       // 2. update, 3. score
+          const u = kalmanUpdate(xs[j], Ps[j], z, R);
+          xs[j] = u.x; Ps[j] = u.P;
+          const maha = u.y[0] * (u.Si[0][0] * u.y[0] + u.Si[0][1] * u.y[1]) + u.y[1] * (u.Si[1][0] * u.y[0] + u.Si[1][1] * u.y[1]);
+          logw.push(Math.log(c[j]) + (-0.5 * (maha + Math.log(u.det)) - Math.log(2 * Math.PI)));
+        }
+        const mx_ = Math.max(...logw), w = logw.map((l) => Math.exp(l - mx_)), sw = w.reduce((a, b) => a + b, 0);
+        mu = w.map((v) => v / sw);                          // 4. new mode probabilities
+      } else mu = c.slice();                                // coast: no plot, no evidence
+      mu = mu.map((v) => Math.max(v, PROB_FLOOR)); const s = mu.reduce((a, b) => a + b, 0); mu = mu.map((v) => v / s);
+      est.push(combineMean(xs, mu)); mus.push(mu.slice());
+    }
+    return { est, mu: mus };
+  }
+
   // ---- network inputs (dataset.track_to_arr). Returns { feats (T x n), base (T x 2) } ----
   function trackFeatures(track, hybrid) {
     const T = track.detected.length, filled = forwardFill(track), radar = track.radar;
@@ -160,29 +234,37 @@
         est.forEach((e, k) => feats[k].push((e[0] - filled[k][0]) / OUT_SCALE, (e[1] - filled[k][1]) / OUT_SCALE, e[2] / VEL_SCALE, e[3] / VEL_SCALE));
         if (q === HYBRID_BASE_Q) base = est.map((e) => [e[0], e[1]]);
       }
+      if (hybrid === "imm") {                  // also show the network the IMM, and correct the IMM instead
+        const { est, mu } = immRun(track);
+        est.forEach((e, k) => feats[k].push((e[0] - filled[k][0]) / OUT_SCALE, (e[1] - filled[k][1]) / OUT_SCALE, e[2] / VEL_SCALE, e[3] / VEL_SCALE, ...mu[k]));
+        base = est.map((e) => [e[0], e[1]]);
+      }
     }
     return { feats, base };
   }
 
   // ---- the trained GRU (gru_numpy.forward). model = window.GRU_MODEL ----
   const sigmoid = (x) => 1 / (1 + Math.exp(-x));
+  // one scan of one GRU layer: x = input vector, h = previous memory. L = {w_ih, w_hh, b_ih, b_hh}
+  function gruStep(L, x, h) {
+    const H = h.length;
+    const gi = L.w_ih.map((row, i) => row.reduce((s, w, j) => s + w * x[j], L.b_ih[i]));
+    const gh = L.w_hh.map((row, i) => row.reduce((s, w, j) => s + w * h[j], L.b_hh[i]));
+    const nh = new Array(H);
+    for (let i = 0; i < H; i++) {
+      const r = sigmoid(gi[i] + gh[i]), z = sigmoid(gi[H + i] + gh[H + i]);
+      const n = Math.tanh(gi[2 * H + i] + r * gh[2 * H + i]);
+      nh[i] = (1 - z) * n + z * h[i];
+    }
+    return nh;
+  }
+
   function gruForward(model, feats, base) {
     let seq = feats;
     for (const L of model.layers) {
-      const H = L.w_hh[0].length;
-      let h = new Array(H).fill(0);
+      let h = new Array(L.w_hh[0].length).fill(0);
       const out = [];
-      for (const x of seq) {
-        const gi = L.w_ih.map((row, i) => row.reduce((s, w, j) => s + w * x[j], L.b_ih[i]));
-        const gh = L.w_hh.map((row, i) => row.reduce((s, w, j) => s + w * h[j], L.b_hh[i]));
-        const nh = new Array(H);
-        for (let i = 0; i < H; i++) {
-          const r = sigmoid(gi[i] + gh[i]), z = sigmoid(gi[H + i] + gh[H + i]);
-          const n = Math.tanh(gi[2 * H + i] + r * gh[2 * H + i]);
-          nh[i] = (1 - z) * n + z * h[i];
-        }
-        h = nh; out.push(h);
-      }
+      for (const x of seq) { h = gruStep(L, x, h); out.push(h); }
       seq = out;
     }
     const W = model.head.w, B = model.head.b;
@@ -190,12 +272,32 @@
   }
 
   function gruRun(model, track) {
-    const hybrid = !!model.config.hybrid, { feats, base } = trackFeatures(track, hybrid);
+    const hybrid = model.config.hybrid, { feats, base } = trackFeatures(track, hybrid);
     return gruForward(model, feats, base);
   }
 
+  // ---- the learned-gain filter (tracker/kalmannet.py). model = window.KNET_MODEL. Returns [[x, y, vx, vy]...] ----
+  function knetRun(model, track) {
+    const T = track.detected.length, filled = forwardFill(track), { feats } = trackFeatures(track, false);
+    let x = [filled[0][0], filled[0][1], 0, 0], prev = [0, 0, 0, 0];
+    let hs = model.cells.map((c) => new Array(c.w_hh[0].length).fill(0));
+    const est = [x.slice()];
+    for (let k = 1; k < T; k++) {
+      const xp = mv(model.F, x), det = track.detected[k] ? 1 : 0;
+      const y = [(filled[k][0] - xp[0]) * det, (filled[k][1] - xp[1]) * det];   // no plot -> no innovation
+      let inp = [y[0] / OUT_SCALE, y[1] / OUT_SCALE, prev[0] / OUT_SCALE, prev[1] / OUT_SCALE, prev[2] / VEL_SCALE, prev[3] / VEL_SCALE,
+        feats[k][4], feats[k][5], feats[k][6], feats[k][9], feats[k][10]];       // detected, staleness, range, radar noise x2
+      model.cells.forEach((c, i) => { hs[i] = gruStep(c, inp, hs[i]); inp = hs[i]; });
+      const g = model.head.w.map((row, i) => sigmoid(row.reduce((s, w, j) => s + w * inp[j], model.head.b[i])));
+      const corr = [g[0] * y[0], g[1] * y[1], g[2] * model.vmax * y[0], g[3] * model.vmax * y[1]];
+      x = xp.map((v, i) => v + corr[i]); prev = corr;
+      est.push(x.slice());
+    }
+    return est;
+  }
+
   const api = { POS_SCALE, VEL_SCALE, OUT_SCALE, TARGET, RADAR, makeRng, simulateTruth, trackFromTruth, simulateTrack,
-    forwardFill, polarToCartCov, cvMatrices, kalmanRun, trackFeatures, gruForward, gruRun };
+    forwardFill, polarToCartCov, cvMatrices, kalmanRun, immRun, trackFeatures, gruForward, gruRun, knetRun };
   if (typeof module !== "undefined" && module.exports) module.exports = api;
   else root.Lab = api;
 })(typeof window !== "undefined" ? window : globalThis);

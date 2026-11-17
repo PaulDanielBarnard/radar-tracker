@@ -23,7 +23,7 @@ def test_the_vectors_describe_a_track_with_misses_and_both_kalman_settings():
 
 def test_the_vectors_are_what_python_computes_for_that_track():
     v = export_testvectors.build_vectors()
-    radar = RadarConfig(sigma_r=80.0, sigma_theta=0.008, p_detect=0.8)
+    radar = RadarConfig(sigma_r=80.0, sigma_theta=0.012, p_detect=0.8)
     track = simulate_track(np.random.default_rng(export_testvectors.SEED), "random", radar, TargetConfig())
     np.testing.assert_allclose(v["kf"]["100"], ConstantVelocityKF(q=100.0).run(track), atol=1e-3)
     np.testing.assert_allclose(v["features"], track_to_arr(track, hybrid=True)[0], atol=1e-5)

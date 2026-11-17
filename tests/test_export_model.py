@@ -72,6 +72,32 @@ def test_the_default_hidden_128_two_layer_model_fits_the_size_budget(tmp_path):
     assert size < export_model.MAX_MODEL_MB * 1024 * 1024
 
 
+def test_the_extra_file_holds_the_imm_fed_gru_and_the_learned_gain_filter(tmp_path):
+    from tracker.dataset import n_features
+    from tracker.kalmannet import KalmanNet
+    torch.manual_seed(0)
+    gru_imm = GRUTracker(n_feat=n_features("imm"), hidden=8, layers=1, hybrid="imm")
+    knet = KalmanNet(hidden=8, layers=2)
+    out = tmp_path / "extra.js"
+    export_model.write_extra_models_js(out, gru_imm, knet)
+    text = out.read_text(encoding="utf-8")
+    assert text.count("window.GRU_MODEL_IMM = ") == 1 and text.count("window.KNET_MODEL = ") == 1
+    lines = text.strip().split("\n")
+    imm = json.loads(lines[0][len("window.GRU_MODEL_IMM = "):].rstrip(";"))
+    kn = json.loads(lines[1][len("window.KNET_MODEL = "):].rstrip(";"))
+    assert imm["config"]["hybrid"] == "imm" and imm["config"]["n_feat"] == 27
+    assert len(kn["cells"]) == 2 and kn["vmax"] == 0.5 and np.array(kn["F"]).shape == (4, 4)
+    assert np.array(kn["cells"][0]["w_ih"]).shape == (24, 11) and np.array(kn["head"]["w"]).shape == (4, 8)
+    assert kn["F"][0][2] == 1.0                                   # constant-velocity transition: x += vx * dt
+
+
+def test_models_that_are_missing_are_left_out_of_the_extra_file(tmp_path):
+    export_model.write_extra_models_js(tmp_path / "e.js", None, None)
+    assert (tmp_path / "e.js").read_text(encoding="utf-8") == ""
+    export_model.write_extra_models_js(tmp_path / "e.js", random_model(True, 1), None)
+    assert "KNET_MODEL" not in (tmp_path / "e.js").read_text(encoding="utf-8")
+
+
 def test_an_oversized_file_gets_a_warning(tmp_path, monkeypatch, capsys):
     monkeypatch.setattr(export_model, "MAX_MODEL_MB", 0)
     export_model.write_model_js(random_model(False, 1), tmp_path / "m.js")

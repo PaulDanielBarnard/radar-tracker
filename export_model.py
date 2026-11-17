@@ -38,9 +38,21 @@ def model_payload(model) -> dict:
     }
 
 
-def write_model_js(model, out_path) -> int:
-    """Write window.GRU_MODEL = {...}; returns the file size in bytes."""
-    text = "window.GRU_MODEL = " + json.dumps(model_payload(model), separators=(",", ":")) + ";\n"
+def kalmannet_payload(model) -> dict:
+    """The learned-gain filter's weights: GRU cells, the gain head and the fixed motion matrix F."""
+    from tracker.kalmannet import VMAX
+    sd = {k: v.detach().cpu().numpy().astype(np.float64) for k, v in model.state_dict().items()}
+    cells = [{"w_ih": _round(sd[f"cells.{i}.weight_ih"]), "w_hh": _round(sd[f"cells.{i}.weight_hh"]),
+              "b_ih": _round(sd[f"cells.{i}.bias_ih"]), "b_hh": _round(sd[f"cells.{i}.bias_hh"])}
+             for i in range(model.config["layers"])]
+    return {"config": dict(model.config), "vmax": VMAX, "F": _round(sd["F"]), "cells": cells,
+            "head": {"w": _round(sd["head.weight"]), "b": _round(sd["head.bias"])}}
+
+
+def _write_js(variables: dict, out_path) -> int:
+    """Write `window.NAME = {...};` for every entry; returns the file size in bytes."""
+    text = "".join(f"window.{name} = " + json.dumps(payload, separators=(",", ":")) + ";\n"
+                   for name, payload in variables.items())
     Path(out_path).write_text(text, encoding="utf-8")
     size = Path(out_path).stat().st_size
     if size > MAX_MODEL_MB * 1024 * 1024:
@@ -48,9 +60,26 @@ def write_model_js(model, out_path) -> int:
     return size
 
 
+def write_model_js(model, out_path) -> int:
+    """Write window.GRU_MODEL = {...}; returns the file size in bytes."""
+    return _write_js({"GRU_MODEL": model_payload(model)}, out_path)
+
+
+def write_extra_models_js(out_path, gru_imm=None, knet=None) -> int:
+    """Write the optional extra models the Random lab can run: window.GRU_MODEL_IMM and window.KNET_MODEL."""
+    variables = {}
+    if gru_imm is not None:
+        variables["GRU_MODEL_IMM"] = model_payload(gru_imm)
+    if knet is not None:
+        variables["KNET_MODEL"] = kalmannet_payload(knet)
+    return _write_js(variables, out_path)
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--model", default="gru_tracker", help="checkpoint name in outputs/")
+    ap.add_argument("--imm-model", default="gru_imm", help="GRU trained with --imm (skipped if missing)")
+    ap.add_argument("--kalmannet", default="kalmannet", help="learned-gain checkpoint (skipped if missing)")
     args = ap.parse_args()
     ckpt = checkpoint(args.model)
     if not ckpt.exists():
@@ -58,6 +87,15 @@ def main():
     WEB.mkdir(exist_ok=True)
     size = write_model_js(load_model(ckpt), WEB / "model.js")
     print(f"Wrote {WEB / 'model.js'} ({size / 1024:.0f} KB)")
+
+    from tracker.kalmannet import load_kalmannet
+    p_imm, p_knet = checkpoint(args.imm_model), checkpoint(args.kalmannet)
+    gru_imm = load_model(p_imm) if p_imm.exists() else None
+    knet = load_kalmannet(p_knet) if p_knet.exists() else None
+    if gru_imm is not None or knet is not None:
+        size = write_extra_models_js(WEB / "model_extra.js", gru_imm, knet)
+        print(f"Wrote {WEB / 'model_extra.js'} ({size / 1024:.0f} KB): "
+              + ", ".join(n for n, m in [("GRU fed the IMM", gru_imm), ("KalmanNet", knet)] if m is not None))
 
 
 if __name__ == "__main__":

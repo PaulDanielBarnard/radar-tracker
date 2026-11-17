@@ -9,16 +9,18 @@
   :root {
     --bg: #f6f7f9; --panel: #ffffff; --ink: #14181f; --muted: #5b6573; --line: #dde1e7;
     --truth: #14181f; --plots: #c2410c; --kf: #1d6fd8; --gru: #0e9f6e; --raw: #8a93a1;
-    --radar: #7c3aed;
+    --radar: #7c3aed; --imm: #d97706; --knet: #db2777; --gruimm: #0891b2;
   }
   @media (prefers-color-scheme: dark) {
     :root:not([data-theme="light"]) {
+      --imm: #fbbf24; --knet: #f472b6; --gruimm: #22d3ee;
       --bg: #0e1116; --panel: #161b22; --ink: #e8ecf2; --muted: #98a2b3; --line: #2a313c;
       --truth: #e8ecf2; --plots: #fb923c; --kf: #5aa2ff; --gru: #34d399; --raw: #7d8696;
       --radar: #a78bfa;
     }
   }
   :root[data-theme="dark"] {
+    --imm: #fbbf24; --knet: #f472b6; --gruimm: #22d3ee;
     --bg: #0e1116; --panel: #161b22; --ink: #e8ecf2; --muted: #98a2b3; --line: #2a313c;
     --truth: #e8ecf2; --plots: #fb923c; --kf: #5aa2ff; --gru: #34d399; --raw: #7d8696;
     --radar: #a78bfa;
@@ -200,6 +202,9 @@
           <label class="sub" style="margin:0">Kalman q
             <select id="lab-q" aria-label="Which Kalman setting to draw"><option value="0.1">0.1</option><option value="10">10</option><option value="100" selected>100</option></select>
           </label>
+          <label class="sub" style="margin:0">Also draw
+            <select id="lab-x" aria-label="Which extra tracker to draw"></select>
+          </label>
         </div>
         <div class="legend small" id="lab-legend"></div>
       </div>
@@ -247,6 +252,7 @@
 <script src="training.js"></script>
 <script src="lab.js"></script>
 <script src="model.js"></script>
+<script src="model_extra.js"></script>
 <script>
 "use strict";
 (() => {
@@ -261,12 +267,18 @@
   const BAR_CAP = 700;
   const NICE = { straight: "Straight", turning: "Turning", maneuvers: "Maneuvers", noisy: "Noisy radar", missed_30: "30% missed scans" };
 
+  // Extra trackers, shown only if data.js has them (python export_demo.py adds them when their models exist).
+  // [key in data.js, label, colour variable, on at start]
+  const EXTRA = [["imm", "IMM filter", "--imm", true], ["knet", "KalmanNet (learned gain)", "--knet", false],
+                 ["gruimm", "GRU fed the IMM", "--gruimm", false]]
+    .filter(([k]) => D.scenarios[0].tracks[0][k] && D.scenarios[0].rmse[k] !== undefined);
   const state = { scn: 0, trk: 0, q: D.qs[1], t: 0, playing: !reduceMotion, view: "ppi", zoom: false, speed: 1,
                   show: { truth: true, plots: true, kf: true, gru: true } };
+  for (const [k, , , on] of EXTRA) state.show[k] = on;
   let prepared = null, view = null, last = 0;
 
   const dist = (a, b) => Math.hypot(a[0] - b[0], a[1] - b[1]);
-  const PPI = { truth: "#e8ecf2", plots: "#fb923c", kf: "#5aa2ff", gru: "#34d399", grn: "60,255,130" };
+  const PPI = { truth: "#e8ecf2", plots: "#fb923c", kf: "#5aa2ff", gru: "#34d399", imm: "#fbbf24", knet: "#f472b6", gruimm: "#22d3ee", grn: "60,255,130" };
 
   // Index of the latest scan the sweep has revealed. In the radar view a plot appears when
   // the beam crosses the target's bearing (t = scan + bearing/360). In close-up it is just floor(t).
@@ -291,12 +303,14 @@
     const kfErr = {};
     for (const q of D.qs) kfErr[q] = track.kf[q].map((p, k) => dist(p, track.truth[k]));
     const gruErr = track.gru.map((p, k) => dist(p, track.truth[k]));
+    const extraErr = {};
+    for (const [k] of EXTRA) extraErr[k] = track[k].map((p, i) => dist(p, track.truth[i]));
     // compass bearing of the target as a fraction of a full turn (0 = north, clockwise)
     const frac = track.truth.map((p) => { let a = Math.atan2(p[0], p[1]); if (a < 0) a += 2 * Math.PI; return a / (2 * Math.PI); });
     let far = 0;
     for (const arr of [track.truth, track.meas, track.gru]) for (const p of arr) if (p) far = Math.max(far, Math.hypot(p[0], p[1]));
     const R = Math.ceil((far * 1.05) / 10000) * 10000;   // display range, rounded up to 10 km
-    return { T, track, rawErr, kfErr, gruErr, frac, R };
+    return { T, track, rawErr, kfErr, gruErr, extraErr, frac, R };
   }
 
   function runningRmse(errs, upto) {
@@ -392,6 +406,7 @@
       }
       if (state.show.kf) { ctx.strokeStyle = PPI.kf; ctx.lineWidth = 2.2; path(ctx, tr.kf[state.q], idx, V); }
       if (state.show.gru) { ctx.strokeStyle = PPI.gru; ctx.lineWidth = 2.2; path(ctx, tr.gru, idx, V); }
+      for (const [k] of EXTRA) if (state.show[k]) { ctx.strokeStyle = PPI[k]; ctx.lineWidth = 2.2; path(ctx, tr[k], idx, V); }
 
       if (state.show.plots) {            // phosphor blips: bright when painted, then fade
         for (let k = 0; k <= idx; k++) if (tr.meas[k]) {
@@ -405,6 +420,7 @@
       }
       if (state.show.kf) dot(ctx, tr.kf[state.q][idx], V, 5, PPI.kf);
       if (state.show.gru) dot(ctx, tr.gru[idx], V, 5, PPI.gru);
+      for (const [k] of EXTRA) if (state.show[k]) dot(ctx, tr[k][idx], V, 5, PPI[k]);
       if (state.show.truth) dot(ctx, tr.truth[idx], V, 3.5, PPI.truth);
     }
     ctx.restore();
@@ -457,6 +473,10 @@
       ctx.strokeStyle = css("--gru"); ctx.lineWidth = 2.2; path(ctx, tr.gru, T, V);
       dot(ctx, tr.gru[T], V, 5, css("--gru"));
     }
+    for (const [k, , c] of EXTRA) if (state.show[k]) {
+      ctx.strokeStyle = css(c); ctx.lineWidth = 2.2; path(ctx, tr[k], T, V);
+      dot(ctx, tr[k][T], V, 5, css(c));
+    }
     if (state.show.truth) dot(ctx, tr.truth[T], V, 4, css("--truth"));
 
     scaleBar(ctx, V, w, h, css("--muted"));
@@ -472,7 +492,8 @@
     ctx.clearRect(0, 0, w, h);
     const P = prepared, T = Math.max(curT(), 0);
     const series = [[P.rawErr, css("--raw"), 1.4, true], [P.kfErr[state.q], css("--kf"), 2, state.show.kf],
-                    [P.gruErr, css("--gru"), 2, state.show.gru]];
+                    [P.gruErr, css("--gru"), 2, state.show.gru],
+                    ...EXTRA.map(([k, , c]) => [P.extraErr[k], css(c), 2, state.show[k]])];
     let max = 50;
     for (const [e, , , on] of series) if (on) max = Math.max(max, ...e);
     max = Math.ceil(max / 50) * 50;
@@ -498,7 +519,8 @@
 
   function updateCards() {
     const P = prepared, T = Math.max(curT(), 0);
-    const items = [["Raw radar", "--raw", P.rawErr], [`Kalman filter (q=${state.q})`, "--kf", P.kfErr[state.q]], ["GRU", "--gru", P.gruErr]];
+    const items = [["Raw radar", "--raw", P.rawErr], [`Kalman filter (q=${state.q})`, "--kf", P.kfErr[state.q]], ["GRU", "--gru", P.gruErr],
+                   ...EXTRA.map(([k, name, c]) => [name, c, P.extraErr[k]])];
     $("cards").innerHTML = items.map(([name, col, e]) => {
       const r = runningRmse(e, T);
       return `<div class="card"><div class="name"><span class="sw" style="background:var(${col})"></span>${name}</div>
@@ -514,6 +536,7 @@
     const cands = [["raw radar", s.raw]];
     for (const q of D.qs) cands.push([`Kalman filter (q=${q})`, s.kf[q]]);
     cands.push(["the GRU", s.gru]);
+    for (const [k, name] of EXTRA) cands.push([name, s[k]]);
     const best = cands.reduce((a, b) => (b[1] < a[1] ? b : a));
     const bestKf = Math.min(...D.qs.map((q) => s.kf[q]));
     const gruWins = s.gru <= bestKf;
@@ -525,7 +548,8 @@
   function buildBars() {
     $("bars").innerHTML = D.scenarios.map((sc, i) => {
       const r = sc.rmse;
-      const rows = [["Raw radar", r.raw, "--raw"], ...D.qs.map((q) => [`Kalman q=${q}`, r.kf[q], "--kf"]), ["GRU", r.gru, "--gru"]];
+      const rows = [["Raw radar", r.raw, "--raw"], ...D.qs.map((q) => [`Kalman q=${q}`, r.kf[q], "--kf"]), ["GRU", r.gru, "--gru"],
+                    ...EXTRA.map(([k, name, c]) => [name.replace(" (learned gain)", ""), r[k], c])];
       const min = Math.min(...rows.map((x) => x[1]));
       return `<div class="group" data-i="${i}" tabindex="0" role="button" aria-label="Replay ${NICE[sc.id]}"><h3>${NICE[sc.id]}</h3>` +
         rows.map(([n, v, c]) => `<div class="row${v === min ? " best" : ""}"><span>${n}</span>
@@ -552,7 +576,8 @@
     $("legend").innerHTML = mk("truth", "--truth", "True path") + mk("plots", "--plots", "Radar plots (noisy)") +
       mk("kf", "--kf", "Kalman filter") +
       `<span class="qpick" aria-label="Kalman q setting">q = ${D.qs.map((q) => `<button type="button" data-q="${q}" aria-pressed="${q === state.q}">${q}</button>`).join("")}</span>` +
-      mk("gru", "--gru", "GRU (learned)");
+      mk("gru", "--gru", "GRU (learned)") + EXTRA.map(([k, name, c]) => mk(k, c, name)).join("");
+    for (const [k, , , on] of EXTRA) if (!on) document.querySelector(`#legend input[data-k="${k}"]`).checked = false;
     document.querySelectorAll("#legend input").forEach((c) => c.addEventListener("change", () => { state.show[c.dataset.k] = c.checked; draw(); }));
     document.querySelectorAll(".qpick button").forEach((b) => b.addEventListener("click", () => {
       state.q = b.dataset.q;
@@ -845,8 +870,11 @@
   const reduceMotion = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
   const BURN = (window.DEMO && window.DEMO.burnIn) || 10;
   const QS = [0.1, 10, 100];
+  const EXTRA_MODELS = window.GRU_MODEL_IMM || window.KNET_MODEL;      // web/model_extra.js (optional)
   const METHODS = [["raw", "Raw radar", "--raw"], ["kf0.1", "Kalman q=0.1", "--kf"], ["kf10", "Kalman q=10", "--kf"],
-                   ["kf100", "Kalman q=100", "--kf"], ["gru", "GRU", "--gru"]];
+                   ["kf100", "Kalman q=100", "--kf"], ["imm", "IMM filter", "--imm"], ["gru", "GRU", "--gru"]];
+  if (window.KNET_MODEL) METHODS.push(["knet", "KalmanNet", "--knet"]);
+  if (window.GRU_MODEL_IMM) METHODS.push(["gruimm", "GRU fed the IMM", "--gruimm"]);
   const S = { flight: null, t: 119, playing: false, seed: 0 };
   let last = 0;
 
@@ -880,6 +908,9 @@
     const est = { raw: filled };
     for (const q of QS) est["kf" + q] = Lab.kalmanRun(track, q);
     est.gru = Lab.gruRun(M, track);
+    est.imm = Lab.immRun(track).est;
+    if (window.KNET_MODEL) est.knet = Lab.knetRun(window.KNET_MODEL, track);
+    if (window.GRU_MODEL_IMM) est.gruimm = Lab.gruRun(window.GRU_MODEL_IMM, track);
     const rmse = {};
     for (const [key] of METHODS) {
       let sum = 0, n = 0;
@@ -919,7 +950,9 @@
     const q = $("lab-q").value;
     line(F.est["kf" + q], css("--kf"), 2.2, k, [], 1);
     line(F.est.gru, css("--gru"), 2.2, k, [], 1);
-    for (const [pts, c] of [[F.est["kf" + q], "--kf"], [F.est.gru, "--gru"], [tr.truth, "--truth"]]) {
+    const xk = $("lab-x").value, xc = (METHODS.find((m) => m[0] === xk) || [])[2];
+    if (xc) line(F.est[xk], css(xc), 2.2, k, [], 1);
+    for (const [pts, c] of [[F.est["kf" + q], "--kf"], [F.est.gru, "--gru"], ...(xc ? [[F.est[xk], xc]] : []), [tr.truth, "--truth"]]) {
       ctx.fillStyle = css(c); ctx.beginPath(); ctx.arc(X(pts[k]), Y(pts[k]), 4.5, 0, 7); ctx.fill();
     }
     const steps = [100, 200, 500, 1000, 2000, 5000, 10000, 20000], target = (w * 0.22) / sc;
@@ -983,6 +1016,9 @@
     showSettings(); newFlight(newSeed());
   });
   $("b-mc").addEventListener("click", runMonteCarlo);
+  $("lab-x").innerHTML = `<option value="">nothing</option>` + METHODS.filter((m) => ["imm", "knet", "gruimm"].includes(m[0]))
+    .map((m) => `<option value="${m[0]}"${m[0] === "imm" ? " selected" : ""}>${m[1]}</option>`).join("");
+  $("lab-x").addEventListener("change", drawFlight);
   $("lab-q").addEventListener("change", drawFlight);
   $("lab-scrub").addEventListener("input", (e) => { S.playing = false; $("lab-play").textContent = "Play"; S.t = +e.target.value; showFlight(); });
   $("lab-play").addEventListener("click", () => {
